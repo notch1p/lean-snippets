@@ -1,0 +1,266 @@
+inductive Token where
+  | LET
+  | EQUAL
+  | IN
+  | FUN
+  | ARROW
+  | IDENT (_ : String)
+  | CON (_ : String)
+  | LPAREN
+  | RPAREN
+  | EOF
+deriving Repr, BEq, Nonempty
+
+/--
+applies `f` on the current state and replaces it, equivalent of `modify f *> get`
+-/
+@[always_inline, inline]
+def modifyThenGet {σ : Type u} {m : Type u → Type v} [MonadState σ m] (f : σ → σ) : m σ :=
+  modifyGet fun s => let fs := f s; (fs, fs)
+
+inductive TError where
+  | BadToken : String -> TError
+  | InvalidCharacter : String -> TError
+  | UnexpectedEof
+  | UnexpectedToken : String -> TError
+deriving Repr
+
+structure Tokenizer where
+  tokenStart : Nat
+  cursor : Nat
+  src : String
+  currToken : Token
+mutual
+inductive TVar where
+  | Free : Nat -> Nat -> TVar
+  | Generic : Nat -> TVar
+  | Solved : MLType -> TVar deriving BEq, Repr
+
+inductive MLType where
+  | T_Var : TVar -> MLType
+  | T_Lam : MLType -> MLType -> MLType
+  | T_Con : String -> MLType
+  | T_App : MLType -> MLType -> MLType deriving BEq, Repr
+
+inductive Expr where
+  | Var : String -> Expr
+  | Con : String -> Expr
+  | Lam : String -> Expr -> Expr
+  | App : Expr -> Expr -> Expr
+  | Let : String -> Expr -> Expr -> Expr deriving BEq, Repr, Nonempty
+end
+namespace Tokenizer
+open Token TError
+abbrev TokenizerST m ρ := StateT Tokenizer m ρ
+def make (src : String) : Tokenizer where
+  tokenStart := 0; cursor := 0; src; currToken := EOF
+
+def peekChar : Tokenizer -> Option Char
+  | {cursor, src,..} =>
+    let c : String.Pos := ⟨cursor⟩
+    if h : src.atEnd c then none
+    else some $ src.get' c h
+
+def nextChar : TokenizerST Id $ Option Char := do
+  let t <- get
+  match t.peekChar with
+  | c@(some _) => set {t with cursor := t.cursor + 1} *> pure c
+  | none => pure none
+
+def lexeme : TokenizerST Id String := do
+  let {src, tokenStart, cursor,..} <- get
+  return src.extract ⟨tokenStart⟩ ⟨cursor⟩
+
+abbrev TokenizerEST m ρ := ExceptT TError (TokenizerST m) ρ
+
+partial def nextIdent : TokenizerEST Id String := do
+  let t <- get
+  match t.peekChar with
+  | none => lexeme
+  | some c =>
+    if c.isAlphanum || c == '_' then
+      set {t with cursor := t.cursor + 1}
+      nextIdent
+    else lexeme
+
+partial def resume : TokenizerEST Id Token := do
+  let t <- modifyThenGet fun t => {t with tokenStart := t.cursor}
+  match <-nextChar with
+  | none => pure EOF
+  | some c =>
+    match c with
+    | ' ' | '\n' | '\t' => resume
+    | '(' => pure LPAREN
+    | ')' => pure RPAREN
+    | '=' => pure EQUAL
+    | '-' => match <-nextChar with
+             | some '>' => pure ARROW
+             | _ => throw $ BadToken s!"bad token '{lexeme t |>.1}'"
+    | c =>
+      if c.isLower || c == '_' then
+        match <-nextIdent with
+        | "let" => pure LET
+        | "in" => pure IN
+        | "fun" => pure FUN
+        | id => pure $ IDENT id
+      else if c.isUpper then
+        pure $ CON (<-nextIdent)
+      else throw $ InvalidCharacter s!"invalid character {c}"
+
+
+def peek : TokenizerEST Id Token := do
+  let t <- get
+  if t.cursor == 0 then
+    let currToken <- resume
+    set {t with currToken}
+  pure (<-get).currToken
+
+def next : TokenizerEST Id Token := do
+  let t <- get
+  let tok <- peek
+  let currToken <- resume
+  set {t with currToken}
+  pure tok
+
+def expectId : TokenizerEST Id String := do
+  match <- next with
+  | IDENT id => pure id
+  | t => throw $ UnexpectedToken s!"unexpected token {reprStr t}, expecting identifier"
+
+def expectToken (t : Token) : TokenizerEST Id Unit := do
+  let nextTok <- next
+  if nextTok != t then
+    throw $ UnexpectedToken s!"unexpected token {reprStr nextTok}, expecting {reprStr t}"
+
+open Expr
+
+mutual
+partial def parseSimpleExpr : TokenizerEST Id Expr :=
+  next >>= fun
+  | IDENT id => return Var id
+  | CON con => return Con con
+  | LPAREN => do
+    let expr <- parseExpr
+    expectToken RPAREN
+    pure expr
+  | t =>
+    throw $ UnexpectedToken s!"unexpected token {reprStr t}, expecting simple expression"
+
+partial def parseExpr : TokenizerEST Id Expr :=
+  peek >>= fun
+  | EOF => throw UnexpectedEof
+  | LET => do
+    let _ <- next
+    let id <- expectId
+    expectToken EQUAL
+    let rhs <- parseExpr
+    expectToken IN
+    let body <- parseExpr
+    return Let id rhs body
+  | FUN => do
+    let _ <- next
+    let param <- expectId
+    expectToken ARROW
+    let body <- parseExpr
+    return Lam param body
+  | _ =>
+    let rec seek (head : Expr) : TokenizerEST Id Expr := do
+      match <- peek with
+      | LPAREN | IDENT _ | CON _ =>
+        let arg <- parseSimpleExpr
+        seek (App head arg)
+      | _ => pure head
+    parseSimpleExpr >>= fun e => seek e
+end
+
+def parseFile : TokenizerEST Id Expr := do
+  let expr <- parseExpr
+  expectToken EOF
+  pure expr
+
+end Tokenizer
+
+inductive TCError where
+  | Occurs
+  | TypeMismatch
+  | VariableNotFound : String -> TCError
+
+structure TvarEnv where
+  C : Nat
+  TV : List (TVar × MLType)
+namespace TypeCheck
+open MLType Expr TVar Tokenizer TCError
+abbrev CounterST m ρ := StateT TvarEnv m ρ
+abbrev CounterTokenST m ρ := CounterST (TokenizerEST m) ρ
+abbrev CounterTokenEST m ρ := ExceptT TCError (CounterTokenST m) ρ
+
+@[inline] def fresh (l : Nat) : CounterTokenST Id MLType :=
+  modifyGetThe TvarEnv fun e@{C,..} => (T_Var $ Free C l, {e with C := C + 1})
+
+@[inline] def freshGeneric : CounterTokenST Id MLType :=
+  modifyGetThe TvarEnv fun e@{C,..} => (T_Var $ Generic C, {e with C := C + 1})
+
+def repr : MLType -> CounterTokenEST Id MLType
+  | T_Var (Solved ty) => do
+    let res <- repr ty
+    modify fun e@{TV,..} => {e with TV := TV.insert (Solved ty, res)}
+    pure res
+  | ty => pure ty
+
+partial def checkOccurs (t : MLType) (lvl : Nat) : CounterTokenEST Id Unit :=
+  repr t >>= fun
+  | T_Var (Free tag lvl') => do
+    let {C, TV} <- get
+    if C == tag then throw Occurs
+    else if lvl < lvl' then modify fun s =>
+      let v := Free tag lvl
+      {s with TV := TV.insert (v, T_Var v)}
+  | T_Var _ => unreachable!
+  | T_Lam t₁ t₂ | T_App t₁ t₂ =>
+    checkOccurs t₁ lvl *> checkOccurs t₂ lvl
+  | T_Con _ => pure ()
+
+partial def unify (t₁ t₂ : MLType) : CounterTokenEST Id Unit := do
+  match <-repr t₁, <-repr t₂ with
+  | T_Var (Free tag lvl), ty | ty, T_Var (Free tag lvl) =>
+    (match ty with
+    | T_Var (Free tag' _) => do
+      if tag == tag' then return ()
+    | _ => pure ())
+    *> checkOccurs ty lvl
+    *> modify fun s@{TV,..} =>
+        {s with TV := TV.insert (Solved ty, ty)}
+  | T_Lam t₁' t₂', T_Lam t₁'' t₂'' => unify t₁' t₁'' *> unify t₂' t₂''
+  | T_Con c₁, T_Con c₂ => if c₁ != c₂ then throw TypeMismatch
+  | T_App f₁ a₁, T_App f₂ a₂ => unify f₁ f₂ *> unify a₁ a₂
+  | _, _ => throw TypeMismatch
+
+partial def generalize (t : MLType) (lvl : Nat) : CounterTokenEST Id MLType := do
+  match <-repr t with
+  | ty@(T_Var (Free tag lvl')) =>
+    if lvl' >= lvl then modify fun e@{TV,..} => {e with TV := TV.insert (Generic tag, ty)}
+    pure ty
+  | T_Lam t₁ t₂ => pure $ T_Lam (<-generalize t₁ lvl) (<-generalize t₂ lvl)
+  | T_App f a => pure $ T_App (<-generalize f lvl) (<-generalize a lvl)
+  | ty => pure ty
+
+partial def instantiate (t : MLType) : CounterTokenEST Id MLType := do
+  go t where
+  go ty := do
+    let {TV,..} <- get
+    match <- repr ty with
+    | T_Var id@(Generic _) =>
+      match TV.lookup id with
+      | some ty => pure ty
+      | none =>
+        let ty <- fresh 1000000
+        modify fun s => {s with TV := TV.insert (id, ty)}
+        pure ty
+    | T_Lam t₁ t₂ => pure <| T_Lam (<- go t₁) (<- go t₂)
+    | T_App f a => pure <| T_App (<- go f) (<- go a)
+    | ty => pure ty
+
+partial def infer : Expr -> CounterTokenEST Id MLType
+  | Var name => match
+
+end TypeCheck

@@ -1,0 +1,7 @@
+/.lake
+/.cache
+compile_commands.json
+Playbook/*.hs
+Playbook/*.rkt
+Playbook/*.ml
+*-ignored.lean
