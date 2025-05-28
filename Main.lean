@@ -1,11 +1,12 @@
 import Playbook.doug
 
 mutual
-def configFromArgs : List String -> (c : Config := {}) -> (s : List System.FilePath := []) -> (Option Config) × List System.FilePath
+
+partial def configFromArgs : List String -> (c : Config := {}) -> (s : List System.FilePath := []) -> (Option Config) × List System.FilePath
   | [], c, s => (some c, s)
   | x :: xs, c, s =>
     modifyConfig xs s x c
-  termination_by ls => (sizeOf ls, 0)
+  termination_by ls => (sizeOf ls, 0) -- proof is too large.
   decreasing_by
     simp
     · apply Prod.Lex.left
@@ -14,7 +15,7 @@ def configFromArgs : List String -> (c : Config := {}) -> (s : List System.FileP
         apply Nat.pos_of_neZero
 
 
-def modifyConfig (xs : List String) (s : List System.FilePath) : String -> Config -> (Option Config) × List System.FilePath
+partial def modifyConfig (xs : List String) (s : List System.FilePath) : String -> Config -> (Option Config) × List System.FilePath
   |"-h", _  | "--help",   _ => (none, [])
             | "--ascii",  c => configFromArgs xs {c with useASCII   := true} s
             /- lean sees `modifyConfig xs c s.. = configFromArgs xs...`
@@ -28,6 +29,7 @@ def modifyConfig (xs : List String) (s : List System.FilePath) : String -> Confi
                still decreasing.
             -/
   |"-a",  c | "--hidden", c => configFromArgs xs {c with showHidden := true} s
+  |"-s",  c | "--synced", c => configFromArgs xs {c with synced     := false} s
   |"-p",  c | "--plain",  c => configFromArgs xs {c with color      := false} s
   |"-d",  c | "--depth",  c =>
     match xs with
@@ -42,11 +44,13 @@ def modifyConfig (xs : List String) (s : List System.FilePath) : String -> Confi
   termination_by (sizeOf xs, 1)
 
 end
+
 open IO in
 def main (args : List String) : IO UInt32 := do
   match configFromArgs args with
   | (some config@{maxdepth,..}, s) =>
     let cwd <- IO.currentDir
+    let fs := if s.isEmpty then [cwd] else s
     let template d : IO String := do
       let s <- mkRef ∅
       dirTree d maxdepth s |>.run config
@@ -54,8 +58,8 @@ def main (args : List String) : IO UInt32 := do
       return s ++ boldYellow
           s!"Total of {f} files, in {d} dirs"
           config.color
-    let workseq <- (if s.isEmpty then [cwd] else s) |>.mapM fun d => template d |>.asTask
-    workseq.forM $ println ∘ (·.get.toOption.get!)
+    let workseq <- fs |>.mapM fun d => template d |>.asTask
+    Task.mapList (·.forM $ println ∘ fun | .error e => e | .ok s => s) workseq |>.get
     return 0
   | (none, []) => printHelp; return 0
   | (none, _) =>

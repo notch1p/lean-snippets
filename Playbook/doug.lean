@@ -5,7 +5,7 @@ structure Config where
   showHidden := false
   maxdepth := 3
   color := true
-
+  synced := false
 structure Res where
   s : String := ""
   fdCount : Nat × Nat := (0, 0)

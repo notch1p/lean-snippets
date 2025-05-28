@@ -22,12 +22,18 @@ inductive AbstractStack.{u, v} (β : Type u) where
     -> F δ -> (δ -> m PUnit) -> m PUnit)                       -- forM
   → ({δ : Type v} -> (β -> δ -> δ) -> δ -> F β -> δ)           -- right fold
   → AbstractStack β
-
+def AbstractStack.F (s : AbstractStack σ) := s.1
+def AbstractStack.push (s : AbstractStack σ) := s.4
 namespace AbstractStack
 
 open List in abbrev ListStack {σ : Type u} (s : List σ) [Inhabited σ] : AbstractStack σ :=
   mk s cons headtail reduce map forA foldr
-
+#reduce
+  let ls := show AbstractStack Unit from ListStack []
+  (ls.F, ls.push) -- type is first class. Therefore still brokes encapsulation.
+#eval
+  let ls := show AbstractStack.{0,0} Nat from ListStack []
+  ls.push 1 [1,2]
 end AbstractStack
 
 open IO AbstractStack in def prog₁ := fun () =>
