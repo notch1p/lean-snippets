@@ -1,8 +1,8 @@
 @[extern "lean_string_repeat"] def leanStringRepeat (c : Char) (n : Nat) : String :=
   go c "" n where
-    go c acc
-    | 0 => acc
-    | _ + 1 => acc ++ c.toString
+  go c acc
+  | 0 => acc
+  | n + 1 => go c (acc.push c) n
 
 @[always_inline, inline] def Char.repeat (c : Char) (n : Nat) : String :=
   leanStringRepeat c n
