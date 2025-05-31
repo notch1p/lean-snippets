@@ -85,8 +85,7 @@ private partial def atom : TParser Expr :=
         , ws funExp
         , ws condExp
         , ws intExp
-        , ws strExp
-        ]
+        , ws strExp]
 -- partial def exp := atom >>= fun x =>
 --   (takeMany1 (spaces *> atom <* spaces) >>= fun xs => return Array.foldl App x xs) <|> return x
 
@@ -275,18 +274,18 @@ def merge (s₁ s₂ : Subst) := s₁ ∪ s₂.map fun _ v => apply s₁ v
 infixl : 65 " ∪' " => merge
 
 def bindTV (a : TV) (t : MLType) : Infer σ Subst :=
-  if t matches TVar _ then pure ∅
+  if t == TVar a then pure ∅
   else if a ∈ fv t then throw $ Duplicates a t
   else pure {(a, t)}
 
 partial def unify : MLType -> MLType -> Infer σ Subst
   | l₁ ×'' r₁, l₂ ×'' r₂
-  | l₁ ->' r₁, l₂ ->' r₂  => do
+  | l₁ ->' r₁, l₂ ->' r₂    => do
     let s₁ <- unify l₁ l₂
     let s₂ <- unify (apply s₁ r₁) (apply s₁ r₂)
     return s₂ ∪' s₁
   | TVar a, t | t, TVar a   => bindTV a t
-  | t@(TCon a), t'@(TCon b) => if a == b then pure ∅  else throw $ NoUnify t t'
+  | t@(TCon a), t'@(TCon b) => if a == b then pure ∅ else throw $ NoUnify t t'
   | t₁, t₂                  => throw $ NoUnify t₁ t₂
 
 @[inline] def fresh : Infer σ MLType :=
@@ -315,23 +314,27 @@ def infer1 (E : Env) : (Subst × (MLType -> MLType)) -> Expr -> Infer σ (Subst 
     return (s' ∪' s, contT ∘ (t ->' ·))
 def infer (E : Env) : Expr -> Infer σ (Subst × MLType)
   | Var x => x ∈ₑ E
+
   | Fun x e => do
-    let tv <- fresh
-    let E' := E.insert x (.Forall [] tv)
+    let tv       <- fresh
+    let E'       := E.insert x (.Forall [] tv)
     let (s₁, t₁) <- infer E' e
     pure (s₁, apply s₁ tv ->' t₁)
+
   | App e₁ e₂ => do
-    let tv <- fresh
+    let tv       <- fresh
     let (s₁, t₁) <- infer E e₁
     let (s₂, t₂) <- infer (apply s₁ E) e₂
     let s₃       <- unify (apply s₂ t₁) (t₂ ->' tv)
     pure (s₃ ∪' s₂ ∪' s₁, apply s₃ tv)
+
   | Let x e₁ e₂ => do
     let (s₁, t₁) <- infer E e₁
-    let E' := apply s₁ E
-    let t' := generalize E' t₁
+    let E'       := apply s₁ E
+    let t'       := generalize E' t₁
     let (s₂, t₂) <- infer (E'.insert x t') e₂
     pure (s₂ ∪' s₁, t₂)
+
   | Cond c t e => do
     let tv         <- fresh
     let tv'        <- fresh
@@ -340,12 +343,14 @@ def infer (E : Env) : Expr -> Infer σ (Subst × MLType)
     let (s₁, cont) <- infer1 E iter2 e
     let s₂         <- unify (apply s₁ (cont tv')) (tBool ->' tv ->' tv ->' tv)
     pure (s₂ ∪' s₁, apply s₂ tv')
+
   | Prod' e₁ e₂ => do
     let (s₁, t₁) <- infer E e₁
     let (s₂, t₂) <- infer (apply s₁ E) e₂
     pure (s₂ ∪' s₁, (apply s₂ t₁) ×'' t₂)
-  | CB _ => pure (∅, tBool) | CI _ => pure (∅, tInt) | CS _ => pure (∅, tString)
-  | CUnit => pure (∅, tUnit)
+
+  | CB _ => pure (∅, tBool)   | CI _  => pure (∅, tInt) 
+  | CS _ => pure (∅, tString) | CUnit => pure (∅, tUnit)
 end
 
 def closed : Std.HashMap TV MLType × MLType -> Scheme
@@ -386,9 +391,9 @@ instance : Inhabited Value := ⟨.VEvalError⟩
 def Value.toStr
   | VI v | VB v | VS v => toString v | VU => toString ()
   | VEvalError => s!"something wrong during evaluation. Likely implementation error."
-  | VOpaque s => s!"<${s}::opaque>"
-  | VF _ _ _ => "<fun>"
-  | VP v₁ v₂ => toStr v₁ ++ "," ++ toStr v₂
+  | VOpaque s  => s!"<${s}::opaque>"
+  | VF _ _ _   => "<fun>"
+  | VP v₁ v₂   => toStr v₁ ++ "," ++ toStr v₂
 
 @[inline, always_inline]abbrev Value.flatten1 : Value -> List Value
   | VP v₁ v₂ => [v₁] ++ [v₂]
@@ -404,15 +409,17 @@ mutual
 
 partial def callForeign (as : List Value) : Nat -> Value
   | t@0 | t@1 | t@2 | t@3 =>
-    match as[0]!, as[1]! with
-    | VI i, VI i' => VI $ (binop t) i i'
-    | _, _ => unreachable!
-  | 4 => match as[0]! with
-         | VB b => VB $ b.not
-         | _ => unreachable!
+    if let (VI i, VI i') := (as[0]!, as[1]!) then 
+      VI $ (binop t) i i'
+    else unreachable!
+
+  | 4 => 
+    if let (VB b) := as[0]! then 
+      VB $ b.not
+    else unreachable!
+
   | 5 =>
-    let rec go i i' :=
-      match i, i' with
+    let rec go
       | VI i, VI i' | VB i, VB i' | VS i, VS i' => i == i'
       | VU, VU => true
       | VP l r, VP l' r' => (go l l' && go r r')
