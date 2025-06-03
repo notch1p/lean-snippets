@@ -1,13 +1,9 @@
-
-/-- The continuation monad, parameterized by the result type `r`. -/
 structure Cont (r : Type u) (α : Type u) where
   run : (α -> r) -> r
-/-- Unwrap the continuation to run it. -/
 def Cont.runCont {r α : Type u} (c : Cont r α) (k : α -> r) : r :=
   c.run k
-namespace Control.Monad.Cont
+namespace Cont
 
-/-- The Monad instance for `Cont r`. -/
 instance (r : Type u) : Monad (Cont r) where
   pure a :=
     { run := fun k => k a }
@@ -16,17 +12,13 @@ instance (r : Type u) : Monad (Cont r) where
         -- run c, then feed 'a' from c into f
         c.run (fun a => (f a).run k) }
 
-/--
-  call-with-current-continuation: captures the current continuation,
-  allowing the user to invoke it within the provided function.
--/
 def callCC {r α β : Type u}
   (f : (α -> Cont r β) -> Cont r α) : Cont r α :=
   ⟨λ k => (f (λ a => ⟨λ _ => k a⟩)).run k⟩
 
-end Control.Monad.Cont
+end Cont
 
-open Control.Monad.Cont
+namespace Test open Cont
 def List.lengthCps : List α -> (Nat -> ρ) -> ρ
   | [], k => k 0 | _ :: xs, k => lengthCps xs (k ∘ Nat.succ)
 def List.lengthCps' : List α -> Cont ρ Nat -- not tailrec
@@ -343,3 +335,4 @@ def List.find?'' (p : α -> Bool) (xs : List α) := Id.run do
 
 def spam : IO Unit := do
   repeat IO.println "Spam!"
+end Test
