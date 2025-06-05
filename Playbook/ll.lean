@@ -1,5 +1,3 @@
-import Playbook.Cps
-
 attribute [simp, grind] Thunk.get
 
 /--
@@ -22,8 +20,9 @@ def ofArray (as : Array α) : LazyList α :=
 /--
   Generate a lazy sequence on `f`. `f` takes a `Fin n` which increase
   at each call to `f`.
+
   e.g. (taken from Lean manual)
-  ```lean
+  ```lean4
   def observe (tag : String) (n : Nat) (i : Fin n) : Nat :=
     dbg_trace "{tag}: {i.val}"
     i.val
@@ -70,10 +69,10 @@ unsafe def beqI [BEq α] (xs ys : LazyList α) : Bool :=
 def decEq [DecidableEq α] : (xs : LazyList α) -> (ys : LazyList α) -> Decidable (xs = ys)
   | nil, nil => isTrue rfl
   | nil, _ ::' _ | _ ::' _, nil => isFalse nofun
-  | x ::' xs, y ::' ys => 
+  | x ::' xs, y ::' ys =>
     if h : x = y then
       match decEq xs.get ys.get with
-      | isTrue h' => 
+      | isTrue h' =>
         isTrue $ (Thunk.ext h') ▸ h ▸ rfl
       | isFalse h' => isFalse λ | rfl => h' rfl
     else isFalse λ | rfl => h rfl
@@ -85,9 +84,9 @@ instance [DecidableEq α] : DecidableEq (LazyList α) := decEq
 @[simp, grind] theorem nil_beq_nil [BEq α] : beq (nil : LazyList α) (nil : LazyList α) = true := @beq.eq_1 α .. ▸ rfl
 @[simp] theorem cons_neq_nil [BEq α] {a : α} {as : LazyList α} : beq (a ::' as) nil = false := by simp[beq]
 @[simp] theorem nil_neq_cons [BEq α] {a : α} {as : LazyList α} : beq nil (a ::' as) = false := by simp[beq]
-@[simp, grind] theorem cons_beq_cons [BEq α] {a b : α} {as bs : LazyList α} : 
-    beq (a ::' as) (b ::' bs) = if a == b 
-                                then beq as bs 
+@[simp, grind] theorem cons_beq_cons [BEq α] {a b : α} {as bs : LazyList α} :
+    beq (a ::' as) (b ::' bs) = if a == b
+                                then beq as bs
                                 else false := by simp[beq];
 
 def snoc! [Inhabited α] : LazyList α -> α × LazyList α
@@ -106,12 +105,12 @@ def tail : (as : LazyList α) -> as ≠ nil -> LazyList α
   | _ ::' xs, _ => xs.get
 def tail? : LazyList α -> Option (LazyList α)
   | nil => none | _ ::' xs => some xs.get
-def tail! : LazyList α -> LazyList α 
+def tail! : LazyList α -> LazyList α
   | nil => panic! "out of bounds" | _ ::' xs => xs.get
 def tailD : LazyList α -> LazyList α -> LazyList α
   | nil, d => d | _ ::' xs, _ => xs.get
 def getLast! [Inhabited α] : LazyList α -> α
-  | nil => panic! "out of bounds" 
+  | nil => panic! "out of bounds"
   | x ::' xs => if xs.get matches nil then x else getLast! xs.get
 def getLast? : LazyList α -> Option α
   | nil => none
@@ -122,7 +121,7 @@ def getLastD : LazyList α -> α -> α
 @[always_inline, inline] abbrev pop := @snoc!
 @[always_inline, inline] abbrev push := @cons
 /--
-  Note that in order to reverse a lazylist, 
+  Note that in order to reverse a lazylist,
   the whole sequence must be forced and allocated again.
 -/
 def reverse (as : LazyList α) : LazyList α :=
@@ -135,6 +134,7 @@ def map (f : α -> β) (l : LazyList α) : LazyList β :=
   match l with
   | nil => nil
   | x ::' xs => f x ::' (map f xs.get)
+instance : Functor LazyList where map := map
 def foldl (f : α -> β -> α) (init : α) (l : LazyList β): α :=
   match l with
   | nil => init
@@ -142,7 +142,7 @@ def foldl (f : α -> β -> α) (init : α) (l : LazyList β): α :=
 
 @[simp, grind] theorem foldl_nil : foldl f init nil = init := by simp[foldl]
 @[simp, grind] theorem foldl_cons : foldl f init (x ::' xs) = foldl f (f init x) xs.get := by simp[foldl]
-  
+
 def foldr (f : α -> β -> β) (init : β) (l : LazyList α) : β :=
   match l with
   | nil => init
@@ -151,30 +151,28 @@ def foldr (f : α -> β -> β) (init : β) (l : LazyList α) : β :=
 @[simp, grind] theorem foldr_nil : foldr f init nil = init := by simp[foldr]
 @[simp, grind] theorem foldr_cons : foldr f init (x ::' xs) = f x (foldr f init xs.get) := by simp[foldr]
 
-def forM [Monad m] (xs : LazyList α) (f : α -> m PUnit) : m PUnit := 
+def forM [Monad m] (xs : LazyList α) (f : α -> m PUnit) : m PUnit :=
   match xs with
   | nil => pure ()
   | x ::' xs => f x *> forM xs.get f
 def mapM [Monad m] (xs : LazyList α) (f : α -> m β) : m (LazyList β) :=
   match xs with
   | nil => pure nil
-  | x ::' xs => do
-    let x <- f x; let xs <- mapM xs.get f
-    pure $ x ::' xs
+  | x ::' xs => (· ::' ·) <$> f x <*> mapM xs.get f
 def foldlM [Monad m] (f : α -> β -> m α) (init : α) (l : LazyList β) : m α :=
   match l with
   | nil => pure init
-  | x ::' xs => do foldlM f (<-f init x) xs.get
+  | x ::' xs => (foldlM f · xs.get) =<< (f init x)
 def foldrM [Monad m] (f : α -> β -> m β) (init : β) (l : LazyList α) : m β :=
   match l with
   | nil => pure init
-  | x ::' xs => do f x (<- foldrM f init xs.get)
+  | x ::' xs => f x =<< foldrM f init xs.get
 instance [Monad m] : ForM m (LazyList α) α := ⟨forM⟩
 instance [Monad m] : ForIn m (LazyList α) α := ⟨ForM.forIn⟩
 
 @[inline, always_inline] def toList (l : LazyList α) := foldr (· :: ·) [] l
 
-@[simp, grind]theorem tolist_nil : toList (nil : LazyList α) = [] := by 
+@[simp, grind]theorem tolist_nil : toList (nil : LazyList α) = [] := by
   simp[toList]
 @[simp, grind]theorem toList_cons : toList (x ::' xs) = x :: toList xs.get := by simp[toList]
 
@@ -184,15 +182,15 @@ instance [Monad m] : ForIn m (LazyList α) α := ⟨ForM.forIn⟩
 /--
   `mapReduce` fuses `map` and `foldl`, i.e.
     `mapReduce mf f l init = map mf l |>.foldl f init` or
-    `mapReduce mf f l = map mf l |>.foldl1 f` 
+    `mapReduce mf f l = map mf l |>.foldl1 f`
   but more efficient.
   Panics iff `l` is ∅ and `init` is `none`.
-  The catamorphism 
+  The catamorphism
   - `mapReduce`
   - `mapReduce'`
-  1. can be optimized to run in parallel within successive recursive call 
+  1. can be optimized to run in parallel within successive recursive call
      iff the element type is a monoid.
-  2. are functionally equivalent 
+  2. are functionally equivalent
      iff the element type is a communtative monoid.
 -/
 def mapReduce [Inhabited β] (mapf : α -> β) (foldf : β -> β -> β) (l : LazyList α) (init : Option β := none) : β :=
@@ -201,21 +199,21 @@ def mapReduce [Inhabited β] (mapf : α -> β) (foldf : β -> β -> β) (l : Laz
 /--
   `mapReduce'` fuses `map` and `foldr`, i.e.
     `mapReduce' mf f l init = map mf l |>.foldr f init` or
-    `mapReduce' mf f l = map mf l |>.foldr1 f` 
+    `mapReduce' mf f l = map mf l |>.foldr1 f`
   but more efficient.
   Panics iff `l` is ∅ and `init` is `none`.
-  The catamorphism 
+  The catamorphism
   - `mapReduce`
   - `mapReduce'`
-  1. can be optimized to run in parallel within successive recursive call 
+  1. can be optimized to run in parallel within successive recursive call
      iff the element type is a monoid.
-  2. are functionally equivalent 
+  2. are functionally equivalent
      iff the element type is a communtative monoid.
 -/
 def mapReduce' [Inhabited β] (mapf : α -> β) (foldf : β -> β -> β) (l : LazyList α) (init : Option β := none) : β :=
   let mf x m := some $ match m with | none => mapf x | some y => (foldf ∘ mapf) x y
   l.foldr mf init |>.getD (panic! "list is empty")
-@[always_inline, inline] 
+@[always_inline, inline]
 def foldl1 [Inhabited α] (f : α -> α -> α) (l : LazyList α) : α := mapReduce id f l
 @[always_inline, inline]
 def foldr1 [Inhabited α] (f : α -> α -> α) (l : LazyList α) : α := mapReduce' id f l
@@ -232,7 +230,7 @@ def toStr [ToString α] (l : LazyList α) : String :=
   bracketed s := s!"[|{s}|]"
   go | nil => "" | xs => xs.mapReduce toString (· ++ ", " ++ ·)
 /--
-  Peeks at the head of a list, unlike `toStr`, 
+  Peeks at the head of a list, unlike `toStr`,
   which eagerly triggers the forcing of the whole list.
   The rest of the list is represented as `⋯` i.e.
     `repr $ ofList [1,2,3,4] = [|1, ⋯|]`
@@ -250,10 +248,11 @@ def lengthI (xs : LazyList α) : Nat :=
 
 def contains [BEq α] (x : α) (xs : LazyList α) : Bool :=
   match xs with
-  | nil => false | x' ::' xs => 
-    match x == x' with 
+  | nil => false | x' ::' xs =>
+    match x == x' with
     | true  => true
     | false => contains x xs.get
+@[always_inline, inline] def elem := @contains
 
 /--
   non tailrec version of `length`. easier to reason about. Should not be used.
@@ -261,12 +260,12 @@ def contains [BEq α] (x : α) (xs : LazyList α) : Bool :=
 @[implemented_by lengthI] private def length : LazyList α -> Nat | nil => 0 | _ ::' xs => length xs.get + 1
 @[simp, grind] theorem length_cons : (a ::' as).length = length as.get + 1 := length.eq_def .. ▸ rfl
 @[simp, grind] theorem length_nil  : length (nil : LazyList α) = 0 := length.eq_def .. ▸ rfl
-@[simp] theorem fin_length_imp_ne_nil (h : Fin $ length as) : as ≠ nil := 
-  λ nh => 
+@[simp] theorem fin_length_imp_ne_nil (h : Fin $ length as) : as ≠ nil :=
+  λ nh =>
     let ⟨v, nh⟩ := length_nil ▸ nh ▸ h;
     Nat.not_succ_le_zero v nh
 @[simp, grind] theorem oflist_length_eq_length : (ofList as).length = as.length := by
-  induction as with 
+  induction as with
   | nil => simp[ofList,length]
   | cons x xs ih => simp[ofList_cons]; apply ih
 @[simp, grind] theorem list_of_tolist_of_oflist : (ofList as).toList = as := by
@@ -279,15 +278,15 @@ def contains [BEq α] (x : α) (xs : LazyList α) : Bool :=
 
 def get : (as : LazyList α) -> (H : Fin (length as)) -> (_ : as ≠ nil := fin_length_imp_ne_nil H) -> α
   | a ::' _, ⟨0, _⟩, _ => a
-  | _ ::' as, ⟨n + 1, h⟩, _ => 
+  | _ ::' as, ⟨n + 1, h⟩, _ =>
     get as.get ⟨ n, have : n + 1 < length as.get + 1 := length_cons ▸ h
-                  ; Nat.succ_lt_succ_iff.mp this⟩ 
-               ( show as.get ≠ (nil : LazyList α) from λ h' => 
-                  Nat.not_succ_le_zero _ 
-                  ( Nat.succ_lt_succ_iff.mp 
-                  $ length_nil 
-                  ▸ h' 
-                  ▸ length_cons 
+                  ; Nat.succ_lt_succ_iff.mp this⟩
+               ( show as.get ≠ (nil : LazyList α) from λ h' =>
+                  Nat.not_succ_le_zero _
+                  ( Nat.succ_lt_succ_iff.mp
+                  $ length_nil
+                  ▸ h'
+                  ▸ length_cons
                   ▸ h))
 
 def get? : LazyList α -> Nat -> Option α
@@ -339,21 +338,22 @@ def takeWhile : (α -> Bool) -> LazyList α -> LazyList α
   Extract the first `n` elements from the sequence. The rest is not forced.
   This way it is more efficient but also may change the evalution semantics compared
   to that of a normal strict `List`:
+
   Suppose the Ω-term
   (which can be introduced in Lean using the unsafe rectype constructor μ)
-  ```Lean
-    Ω = λ x => x x 
+  ```lean4
+    Ω = λ x => x x
   ```
-  where `Ω ->* Ω`, and for a polymorphic sequence 
-  ```Lean
+  where `Ω ->* Ω`, and for a polymorphic sequence
+  ```lean4
     l := [|⟨"123"⟩, ⟨123⟩, ⟨Ω⟩|] : LazyList Obj
   ```
   which elements are encoded using existentials `Obj`, we have
-  
+
   - `l |> take 2` terminates while
   - `l |> take 3` doesn't.
 -/
-def take (n : Nat) (l : LazyList α) : LazyList α := 
+def take (n : Nat) (l : LazyList α) : LazyList α :=
   match l, n with
   | nil, _ => nil
   | _ ::' _, 0 => nil
@@ -368,7 +368,7 @@ def dropWhile (f : α -> Bool) (l : LazyList α) : LazyList α :=
     else t
 def drop (n : Nat) (l : LazyList α) : LazyList α :=
   match l, n with
-  | nil, _ => nil 
+  | nil, _ => nil
   | xs, 0 => xs
   | _ ::' xs, n + 1 =>
     drop n xs.get
@@ -376,7 +376,6 @@ def drop (n : Nat) (l : LazyList α) : LazyList α :=
 def extract (l : LazyList α) (start : Nat) (stop : Nat := l.length) : LazyList α :=
   match l, start, stop with
   | nil, _, _ => nil
-  | x ::' _, 0, 0 => {x}
   | x ::' xs, 0, n + 1 => x ::' extract xs.get 0 n
   | _ ::' xs, n + 1, n' + 1 => extract xs.get n n'
   | _ ::' _, _, 0 => nil
@@ -384,47 +383,73 @@ def extract (l : LazyList α) (start : Nat) (stop : Nat := l.length) : LazyList 
 def filter (f : α -> Bool) (l : LazyList α) : LazyList α :=
   match l with
   | nil => nil
-  | x ::' xs => 
+  | x ::' xs =>
     if f x then x ::' filter f xs.get
     else filter f xs.get
 def filterMap (f : α -> Option β) (l : LazyList α) : LazyList β :=
   match l with
   | nil => nil
   | x ::' xs =>
-    if let (some x) := f x then 
+    if let (some x) := f x then
       x ::' filterMap f xs.get
     else filterMap f xs.get
-
+def filterMapM [Monad m] (f : α -> m (Option β)) : LazyList α -> m (LazyList β)
+  | nil => pure nil
+  | x ::' xs =>
+    f x >>= fun
+            | none => filterMapM f xs.get
+            | some x =>
+              (x ::' ·) <$> filterMapM f xs.get
 def flatten : LazyList (LazyList α) -> LazyList α
   | nil => nil
   | x ::' xs => x ++ flatten xs.get
 def flatMap (f : α -> LazyList β) : LazyList α -> LazyList β
   | nil => nil
   | x ::' xs => f x ++ flatMap f xs.get
+def flatMapM [Monad m] (f : α -> m (LazyList β)) : LazyList α -> m (LazyList β)
+  | nil => pure nil
+  | x ::' xs =>
+    (· ++ ·) <$> f x <*> flatMapM f xs.get
+
 /--
-  Generate a sequence of number, 
+  Generate a potentially infinity sequence of objects of `(S, 0, 1, +, <)`,
   with upper bound and lower bound being `start stop`,
-  incremented by `step := 1`.
-  - generates an infinite lazy sequence if lower bound not provided.
+  incremented by `step`.
+  Note that the commutativity of `(· + ·)` isn't enforced.
+  Special cases are listed below:
+  - generates an infinite lazy sequence if
+    lower bound not provided (this is the case of `nats` and `ints`).
+  - generates an infinite constant lazy sequence if `step = 0` and `stop ≠ start`
+  - generates an infinite lazy sequence if
+    `stop > start` and `step <= 0`. (this is the case `ints` if set to countdown)
+  - generates nothing if `start <= stop`.
+
+  (That is, if every instances involved above are implemented in a common-sense way.)
+
   e.g.
-    ```lean
-    gen 0 |>.filter (· ^ 2 > 4) = [x | x <- [0..], x ^ 2 > 4]
-                                = [3, ⋯]
-                       take 3 _ = [3, 4, 5]
-    ```
+  ```lean4
+  gen |>.filter (· ^ 2 > 4) = [x | x <- [0..], x ^ 2 > 4]
+                            = [3, ⋯]
+                   take 3 _ = [3, 4, 5]
+  ```
 -/
-partial def gen (start : Nat) (stop : Option Nat := none) (step := 1) : LazyList Nat :=
+partial def gen [Add α] [Zero α] [One α] [LT α] [DecidableLT α]
+  (start : α := 0) (stop : Option α := none) (step : α := 1) : LazyList α :=
   match stop with
   | none => start ::' gen (start + step) stop step
   | s@(some x) =>
     if x > start then
       start ::' gen (start + step) s step
-    else 
+    else
       nil
+
+@[always_inline, inline, inherit_doc gen]
+def nats (start := 0) (step := 1) := show LazyList Nat from gen start (step := step)
+def ints start (step : Int := 1) := show LazyList Int from gen start (step := step)
 /--
   Generate a sequence of number from `Std.Range`. Guarantees termination.
 -/
-def fromRange : Std.Range -> LazyList Nat
+@[always_inline, inline] def fromRange : Std.Range -> LazyList Nat
   | {start, step, stop,..} => gen start stop step
 
 inductive Mem (a : α) : (as : LazyList α) -> Prop where
@@ -480,7 +505,7 @@ scoped infixl:50 " <+ " => isSub
 def findIdx? [BEq α] (p : α -> Bool) : LazyList α -> Option Nat := go p 0 where
   go p i
   | nil => none
-  | x ::' xs => if p x then some i else go p (i + 1) xs.get 
+  | x ::' xs => if p x then some i else go p (i + 1) xs.get
 
 /--
   A naive version of finding a pattern in a lazy sequence.
@@ -489,9 +514,9 @@ def findIdx? [BEq α] (p : α -> Bool) : LazyList α -> Option Nat := go p 0 whe
 def find? [BEq α] (pat ctx : LazyList α) : Option Nat :=
   let rec go i
     | nil => none
-    | t@(_ ::' xs)  => 
+    | t@(_ ::' xs)  =>
       if pat <+: t then some i
-      else 
+      else
         go (i + 1) xs.get
   go 0 ctx
 scoped infixl:50 " <:+: " => find?
@@ -500,7 +525,7 @@ scoped infixl:50 " <:+: " => find?
   Applies a (monadic) function `f` over a lazylist,
   For any element `e` and any subterm `es`,
   if `f e` and `e` as well as `es` and `mapMonoI f es`
-  is physically equal (that is, pointer equality), 
+  is physically equal (that is, pointer equality),
   then we do not allocate a new list.
 -/
 private unsafe def mapMonoI [Monad m] (f : α -> m α) (as : LazyList α) : m $ LazyList α := do
@@ -522,9 +547,66 @@ partial def String.search (pat text : String) : Option Nat :=
     if j == lPat then some $ k - j
     else if k == lText then none
     else if pat.get ⟨j⟩ == text.get ⟨k⟩ then
-      go (j + 1) (k + 1) 
+      go (j + 1) (k + 1)
     else
       go 0 (k - j + 1)
   go 0 0
+
+protected def Subset (xs ys : LazyList α) := ∀ ⦃a : α⦄, a ∈ xs -> a ∈ ys
+instance : HasSubset (LazyList α) := ⟨LazyList.Subset⟩
+
+instance decidableExists (P : α -> Prop) [DecidablePred P] :
+  (xs : LazyList α) -> Decidable (∃x ∈ xs, P x)
+  | nil => isFalse nofun
+  | x ::' xs =>
+    if h₁ : P x then isTrue ⟨x, Mem.head xs.get, h₁⟩
+    else
+      match decidableExists P xs.get with
+      | isTrue h => isTrue $ by
+          rcases h with ⟨w, h, h'⟩
+          have := Mem.step x h
+          exact ⟨w, this, h'⟩
+      | isFalse h => isFalse $ by
+          rintro ⟨w, h', h''⟩
+          cases h' with
+          | head => exact h₁ h''
+          | step _ hw => exact h ⟨w, hw, h''⟩
+
+instance decidableForall (P : α -> Prop) [DecidablePred P] :
+  (xs : LazyList α) -> Decidable (∀x ∈ xs, P x)
+  | nil => isTrue nofun
+  | x ::' xs =>
+    if h : P x then
+      match decidableForall P xs.get with
+      | isTrue h' =>
+        isTrue $ λ
+                 | y, Mem.head _ => h
+                 | y, Mem.step _ hstep => h' y hstep
+      | isFalse h' =>
+        isFalse $ λ nh =>
+        let ⟨w, h'⟩ := Classical.not_forall.mp h'
+        let h' := not_imp.mp h'
+        h'.2 $ nh w $ Mem.step x h'.1
+    else isFalse $ λ nh => h $ nh x $ Mem.head xs.get
+
+instance [DecidableEq α] : DecidableRel (Subset : LazyList α -> LazyList α -> Prop) :=
+  fun _ _ => decidableForall _ _
+
+/--
+  right folds a lazy sequence using `(· <|> ·)`, throws `failure` for a empty list,
+  i.e. `firstM f l = foldr (· <|> ·) failure l`.
+  In practice, this means `firstM` tries every actions
+  and stop after the first successful action and returns its result.
+
+  e.g.
+  ```lean4
+  def div10 y := if y == 0 then none else some $ 10 / y
+  [|0, 0, 10, 20|].firstM div10 = some 1
+  ```
+-/
+def firstM [Alternative m] (f : α -> m β) : LazyList α -> m β
+  | nil => failure
+  | x ::' xs => f x <|> firstM f xs.get
+@[always_inline, inline, inherit_doc firstM] def asum := @firstM
 
 end LazyList
