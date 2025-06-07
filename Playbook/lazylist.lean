@@ -4,9 +4,15 @@
 
   e.g. `[|1,2,3|] = 1 ::' 2 ::' 3 ::' nil`. Note that
   - `[||] = nil` where `nil = (nil : LazyList α)`
-  - `[|_,_|] = .. ::' nil` where `nil = (↑nil : Thunk (LazyList α)`
+  - `[|_,_|] = .. ::' nil` where `nil = (↑nil : Thunk (LazyList α))`
 
   **Any side effect within the elements is evaluated just once.**
+  - Most tailrec variants of the methods (and catamorphisms) on lazy list (whose identifier ends with 'TR') in this module, 
+    by their nature, are strict and will always force the whole list. Meaning these functions will diverge on a infinite sequence.
+    (exceptions (methods may terminate even when input is infinite) are explicitly told in documentations)
+  - Although Lean facilitates automatic typecasting through `Coe` and
+    there is a `Coe` instance from `α` to `Thunk α`, for the sake of clarity we still
+    explicitly perform casting with `↑` on functions that have laziness.
 -/
 inductive LazyList (α : Type u)
   | nil
@@ -24,9 +30,9 @@ def singleton (a : α) := a ::' (.pure nil)
 def ofList (as : List α) : LazyList α := as.foldr (· ::' ·) nil
 def ofListTR (as : List α) : LazyList α := as.reverse.foldl (flip (· ::' ·)) nil
 
-theorem ofList_nil : ofList ([] : List α) = nil := rfl
-theorem ofList_cons : ofList (x :: xs) = x ::' ofList xs := rfl
-attribute [simp, grind] ofList_nil ofList_cons
+theorem oflist_nil : ofList ([] : List α) = nil := rfl
+theorem oflist_cons : ofList (x :: xs) = x ::' ofList xs := rfl
+attribute [simp, grind] oflist_nil oflist_cons
 
 def ofArray (as : Array α) : LazyList α :=
   Nat.foldRev as.size (init := nil) fun i h a => as[i] ::' a
@@ -127,10 +133,13 @@ abbrev pop := @snoc!
 abbrev push := @cons
 attribute [always_inline, inline] pop push
 
+/--
+  guarantees laziness
+-/
 def map (f : α -> β) (l : LazyList α) : LazyList β :=
   match l with
   | nil => nil
-  | x ::' xs => f x ::' (map f xs.get)
+  | x ::' xs => f x ::' ↑(map f xs.get)
 
 instance : Functor LazyList where map := map
 
@@ -155,15 +164,19 @@ def foldr (f : α -> β -> β) (init : β) (l : LazyList α) : β :=
 
 @[inline] def mapTR (f : α -> β) (l : LazyList α) : LazyList β :=
   l.foldl (flip $ (· ::' ·) ∘ f) nil |>.reverse
-
 def forM [Monad m] (xs : LazyList α) (f : α -> m PUnit) : m PUnit :=
   match xs with
   | nil => pure ()
   | x ::' xs => f x *> forM xs.get f
+/--
+  - LAZINESS
+  Unlike `map`, `mapM` is strict because to unwrap a monadic value in a monadic context,
+  we have to compute it first.
+-/
 def mapM [Monad m] (xs : LazyList α) (f : α -> m β) : m (LazyList β) :=
   match xs with
   | nil => pure nil
-  | x ::' xs => (· ::' ·) <$> f x <*> mapM xs.get f
+  | x ::' xs => (· ::' ·) <$> f x <*> (mapM xs.get f)
 def foldlM [Monad m] (f : α -> β -> m α) (init : α) (l : LazyList β) : m α :=
   match l with
   | nil => pure init
@@ -179,63 +192,99 @@ instance [Monad m] : ForIn m (LazyList α) α := ⟨ForM.forIn⟩
 
 @[simp, grind]theorem tolist_nil : toList (nil : LazyList α) = [] := by
   simp[toList]
-@[simp, grind]theorem toList_cons : toList (x ::' xs) = x :: toList xs.get := by simp[toList]
+@[simp, grind]theorem tolist_cons : toList (x ::' xs) = x :: toList xs.get := by simp[toList]
 def toArray (l : LazyList α) := foldl (·.push) #[] l
 def toListRev (l : LazyList α) := foldl (flip (· :: ·)) [] l
+def toListTR (l : LazyList α) := toArray l |>.toList
+
 def foldrTR (f : α -> β -> β) (init : β) (l : LazyList α) := l.toArray.foldr f init
 attribute [always_inline, inline] toArray toListRev foldrTR
 
 /--
-  `mapReduce` fuses `map` and `foldl`, i.e.
-    `mapReduce mf f l init = map mf l |>.foldl f init` or
-    `mapReduce mf f l = map mf l |>.foldl1 f`
-  but more efficient.
-  Panics iff `l` is ∅ and `init` is `none`.
+  `mapReducel` and `mapReducelD` fuses `map` and `foldl`, i.e.
+    `mapReducel mapf foldf l init = map mapf foldf l |>.foldl foldf init` or
+    `mapReducel mapf foldf l = map mapf l |>.foldl1 foldf`
+  but more efficient than the RHS.
+  - `mapReducelD` is a version that directly calls `foldl` therefore requires `init` and retains the type of `foldl`;
+  - `mapReducel` requires the type of the element to be inhabited and panics iff `l` is ∅ and `init` is `none`.
+  - When possible, prefer `mapReducelD` over `mapReducel`. As for the latter `foldf` might be called with 0 or 2 args,
+    this property is simulated using `Option`, which represent a nullable object, but is less efficient than native.
+    This is particularly important for the case where `l` is ∅ and `init` is `none`. 
   The catamorphism (and their variants)
-  - `mapReduce`
-  - `mapReduce'`
-  1. can be optimized to run in parallel within successive recursive call
-     iff the element type is a monoid.
-  2. are functionally equivalent
-     iff the element type is a monoid i.e. has associativity.
+  - `mapReducel`
+  - `mapReducer`
+  can be optimized to run in parallel within successive recursive call 
+  and are functionally quivalent 
+  iff the element type is a monoid. i.e. has associativity
 -/
 def mapReducel [Inhabited β] (mapf : α -> β) (foldf : β -> β -> β) (l : LazyList α) (init : Option β := none) : β :=
   let mf m y := some $ match m with | none => mapf y | some x => (flip (flip foldf ∘ mapf)) x y
   l.foldl mf init |>.getD (panic! "list is empty")
-def mapReducelD (mapf : α -> β) (foldf : β -> β -> β) (l : LazyList α) (init : β) : β :=
+@[inherit_doc mapReducel]def mapReducelD (mapf : α -> β) (foldf : γ -> β -> γ) (l : LazyList α) (init : γ) : γ :=
   l.foldl (flip (flip foldf ∘ mapf)) init
 /--
-  `mapReduce'` fuses `map` and `foldr`, i.e.
-    `mapReduce' mf f l init = map mf l |>.foldr f init` or
-    `mapReduce' mf f l = map mf l |>.foldr1 f`
-  but more efficient.
-  Panics iff `l` is ∅ and `init` is `none`.
+  `mapReducer` and `mapReducerD` fuses `map` and `foldr`, i.e.
+    `mapReducer mapf foldf l init = map mapf foldf l |>.foldr foldf init` or
+    `mapReducer mapf foldf l = map mapf l |>.foldr1 foldf`
+  but more efficient than the RHS.
+  - `mapReducerD` is a version that directly calls `foldr` therefore requires `init` and retains the type of `foldr`
+  - `mapReducer` requires the type of the element to be inhabited and panics iff `l` is ∅ and `init` is `none`.
+  - When possible, prefer `mapReducerD` over `mapReducer`. As for the latter `foldf` might be called with 0 or 2 args,
+    this property is simulated using `Option`, which represent a nullable object, but is less efficient than native.
+    This is particularly important for the case where `l` is ∅ and `init` is `none`. 
   The catamorphism (and their variants)
-  - `mapReduce`
-  - `mapReduce'`
-  1. can be optimized to run in parallel within successive recursive call
-     iff the element type is a monoid.
-  2. are functionally equivalent
-     iff the element type is a communtative monoid.
+  - `mapReducel`
+  - `mapReducer`
+  can be optimized to run in parallel within successive recursive call
+  and are functionally equivalent
+  iff the element type is a monoid i.e. has associativity.
 -/
 def mapReducer [Inhabited β] (mapf : α -> β) (foldf : β -> β -> β) (l : LazyList α) (init : Option β := none) : β :=
   let mf x m := some $ match m with | none => mapf x | some y => (foldf ∘ mapf) x y
   l.foldr mf init |>.getD (panic! "list is empty")
-def mapReducerD (mapf : α -> β) (foldf : β -> β -> β) (l : LazyList α) (init : β) : β :=
+@[inherit_doc mapReducer] def mapReducerD (mapf : α -> β) (foldf : β -> γ -> γ) (l : LazyList α) (init : γ) : γ :=
   l.foldr (foldf ∘ mapf) init
 attribute [inline] mapReducelD mapReducerD
 
-def foldl1 [Inhabited α] (f : α -> α -> α) (l : LazyList α) : α := mapReducel id f l
-def foldr1 [Inhabited α] (f : α -> α -> α) (l : LazyList α) : α := mapReducer id f l
-attribute [always_inline, inline] foldl1 foldr1
-
 @[simp] theorem cons_ne_nil {a : α} {as : Thunk $ LazyList α} : a ::' as ≠ nil := nofun
+
+/-- `foldl1 f l _ = mapReducel id f l`, but is defined directly. -/
+def foldl1 (f : α -> α -> α) : (l : LazyList α) -> l ≠ nil -> α
+  | x ::' xs, h =>
+    match h : xs.get with
+    | nil => x
+    | y ::' ys =>
+      foldl1 f (f x y ::' ys) $ by
+        simp
+termination_by l _ => l
+decreasing_by simp[-Thunk.get, h]; omega
+/-- `foldl1D` is defined through foldl1. -/
+def foldl1D (f : α -> α -> α) (l : LazyList α) : Option α :=
+  match h : l with
+  | nil => none
+  | _ ::' _ => some $ foldl1 f l $ h ▸ cons_ne_nil
+/-- `foldl1! f l := foldl1D f l |>.getD ..` -/
+def foldl1! [Inhabited α] (f : α -> α -> α) (l : LazyList α) : α := foldl1D f l |>.getD (panic! "list is empty")
+
+/-- `foldr1 f l _ = mapReducer id f l`, but is defined directly. -/
+def foldr1 (f : α -> α -> α) : (l : LazyList α) -> l ≠ nil -> α
+  | x ::' xs, _ =>
+    match h : xs.get with
+    | nil => x | y ::' ys => f x $ foldr1 f xs.get $ h ▸ cons_ne_nil
+/-- `foldr1D` is defined through foldr1. -/
+def foldr1D (f : α -> α -> α) (l : LazyList α) : Option α :=
+  match h : l with
+  | nil => none
+  | _ ::' _ => some $ foldr1 f l $ h ▸ cons_ne_nil
+/-- `foldr1! f l := foldr1D f l |>.getD ..` -/
+def foldr1! [Inhabited α] (f : α -> α -> α) (l : LazyList α) : α := foldr1D f l |>.getD (panic! "list is empty")
+attribute [always_inline, inline] foldl1! foldr1!
 
 private def getLastI : (as : LazyList α) -> as ≠ nil -> α
   | (x ::' xs), _ => xs.get.foldl const2 x
 private def getLast?I (as : LazyList α) : Option α :=
   as.foldl (flip $ const2 ∘ some) none
-private def getLast!I [Inhabited α] (as : LazyList α) : α := as.foldl1 const2
+private def getLast!I [Inhabited α] (as : LazyList α) : α := as.foldl1! const2
 private def getLastDI (as : LazyList α) (dflt : α) : α := as.foldl const2 dflt
 attribute [always_inline, inline] getLastI getLast?I getLast!I getLastDI
 
@@ -245,12 +294,11 @@ attribute [always_inline, inline] getLastI getLast?I getLast!I getLastDI
 -/
 @[implemented_by getLastI] def getLast : (as : LazyList α) -> as ≠ nil -> α
   | x ::' xs, _ =>
-    set_option linter.unusedVariables false in match h' : xs.get with
+    match h' : xs.get with
     | nil => x
     | (y ::' ys) => getLast (y ::' ys) cons_ne_nil
 termination_by as _ => as
-decreasing_by
-  rw [← h']; simp[-Thunk.get]; omega
+decreasing_by simp[-Thunk.get, h']; omega
 @[implemented_by getLast!I] def getLast! [Inhabited α] : LazyList α -> α
   | nil => panic! "out of bounds"
   | x ::' xs => if xs.get matches nil then x else getLast! xs.get
@@ -287,6 +335,12 @@ instance [Repr α] : Repr $ LazyList α := ⟨flip $ const (.text ∘ peek)⟩
 private def lengthI (xs : LazyList α) : Nat :=
   xs.foldl (flip $ (· + ·) ∘ const 1) 0
 
+/--
+  - LAZINESS
+  `contains` is strict. `contains x xs` terminates only for 
+    - any finite sequence `xs`
+    - any infinite `xs` where `x ∈ xs`
+-/
 def contains [BEq α] (x : α) (xs : LazyList α) : Bool :=
   match xs with
   | nil => false | x' ::' xs =>
@@ -296,8 +350,8 @@ def contains [BEq α] (x : α) (xs : LazyList α) : Bool :=
 @[always_inline, inline] def elem := @contains
 
 /--
-  non tailrec version of `length`. easier to reason about. Override in runtime by
-  a tailrec version using `foldl`.
+  non tailrec version of `length`. easier to reason about. 
+  Override in runtime by a tailrec version using `foldl`.
 -/
 @[implemented_by lengthI] def length : LazyList α -> Nat | nil => 0 | _ ::' xs => length xs.get + 1
  theorem length_cons : (a ::' as).length = length as.get + 1 := length.eq_def .. ▸ rfl
@@ -312,15 +366,21 @@ attribute [simp, grind] length_cons length_nil length_thunk_nil
 @[simp, grind] theorem oflist_length_eq_length : (ofList as).length = as.length := by
   induction as with
   | nil => simp[ofList,length]
-  | cons x xs ih => simp[ofList_cons]; apply ih
+  | cons x xs ih => simp[oflist_cons]; apply ih
 @[simp, grind] theorem list_of_tolist_of_oflist : (ofList as).toList = as := by
   induction as with
   | nil => simp[toList]
-  | cons x xs h => simp[toList_cons]; apply h
+  | cons x xs h => simp[tolist_cons]; apply h
 
 @[simp, grind] theorem length_nil_eq_list_length_nil : length (nil : LazyList α) = ([] : List α).length := by simp
 @[simp, grind] theorem length_cons_eq_list_length_cons : length (x ::' (ofList xs)) = (x :: xs).length := by simp
 
+/--
+  - LAZINESS
+  `get` and its variants are strict. `get xs n _` terminates only for 
+    - any finite sequence `xs`
+    - any infinite `xs` where `xs[n] ∈ xs`
+-/
 def get : (as : LazyList α) -> (H : Fin (length as)) -> (_ : as ≠ nil := fin_length_imp_ne_nil H) -> α
   | a ::' _, ⟨0, _⟩, _ => a
   | _ ::' as, ⟨n + 1, h⟩, _ =>
@@ -353,38 +413,49 @@ instance : GetElem? (LazyList α) Nat α fun as i => i < as.length where
   getElem? := get?
   getElem! := get!
 
+/--
+  guarantees laziness.
+-/
 def set : LazyList α -> Nat -> α -> LazyList α
   | nil, _, _ => nil
-  | _ ::' xs, 0, s => s ::' xs
-  | x ::' xs, n + 1, s => x ::' set xs.get n s
+  | _ ::' xs, 0, s => s ::' ↑xs
+  | x ::' xs, n + 1, s => x ::' ↑(set xs.get n s)
 
 /--
-  `append` is override by `appendTR`, which is defined through
-  `revAppend`.
-  `revAppend xs ys = xs.reverse ++ ys`
+  - `append` is the canonical method for concatenating 2 sequence, guarantees laziness.
+  - `appendTR` is the strict, tailrec version of `append`, implemented using `revAppend`
+  - `revAppend xs ys = xs.reverse ++ ys`, implemented using `foldl`.
 -/
 def revAppend {α} xs ys := show LazyList α from foldl (flip (· ::' ·)) ys xs
-def appendTR {α} xs ys := show LazyList α from revAppend (reverse xs) ys
+@[inherit_doc revAppend]def appendTR {α} xs ys := show LazyList α from revAppend (reverse xs) ys
 attribute [inline] revAppend appendTR
-@[implemented_by appendTR] def append : LazyList α -> LazyList α -> LazyList α
+@[inherit_doc revAppend]def append : LazyList α -> LazyList α -> LazyList α
   | nil, l | l, nil => l
-  | x ::' xs, l => x ::' append xs.get l
-instance : Append (LazyList α) := ⟨appendTR⟩
+  | x ::' xs, l => x ::' ↑(append xs.get l)
+instance : Append (LazyList α) := ⟨append⟩
 
 def concat (xs : LazyList α) (x : α) := xs.foldr (· ::' ·) {x}
 @[always_inline, inline] abbrev pushBack := @concat
+
+/--
+  - LAZINESS
+  insert depends on `contains`. Thus behaves the same if given an infinite sequence.
+-/
 def insert [BEq α] (a : α) (l : LazyList α) : LazyList α :=
   if l.contains a then l else a ::' l
 instance [BEq α] : Insert α (LazyList α) := ⟨insert⟩
 
+/--
+  guarantees laziness.
+-/
 def takeWhile : (α -> Bool) -> LazyList α -> LazyList α
   | _, nil => nil
   | f, x ::' xs =>
     if f x then
-      x ::' takeWhile f xs.get
+      x ::' ↑(takeWhile f xs.get)
     else nil
 /--
-  Extract the first `n` elements from the sequence. The rest is not forced.
+  Extract the first `n` elements from the sequence. The rest is not forced. guarantees laziness.
   This way it is more efficient but also may change the evalution semantics compared
   to that of a normal strict `List`:
 
@@ -399,18 +470,24 @@ def takeWhile : (α -> Bool) -> LazyList α -> LazyList α
   ```
   which elements are encoded using existentials `Obj`, we have
 
-  - `l |> take 2` terminates while
-  - `l |> take 3` doesn't.
+  - `l.take 2` terminates while
+  - `l.take 3` doesn't.
 -/
 def take (n : Nat) (l : LazyList α) : LazyList α :=
   match l, n with
   | nil, _ | _ ::' _, 0 => nil
-  | x ::' xs, n + 1 => x ::' take n xs.get
+  | x ::' xs, n + 1 => x ::' ↑(take n xs.get)
 def takeTR (n : Nat) (l : LazyList α) : LazyList α := go #[] n l |> ofArray where
   go acc
   | _, nil | 0, _ => acc
   | n + 1, x ::' xs => go (Array.push acc x) n xs.get
 
+/--
+  - LAZINESS
+  `dropWhile` is strict. `dropWhile f l` terminates only for
+    - any finite sequence l
+    - any infinite sequence l where `∃x ∈ l, f x -> false`.
+-/
 def dropWhile (f : α -> Bool) (l : LazyList α) : LazyList α :=
   match l with
   | nil => nil
@@ -425,20 +502,34 @@ def drop (n : Nat) (l : LazyList α) : LazyList α :=
   | _ ::' xs, n + 1 =>
     drop n xs.get
 
+/--
+  - LAZINESS
+  `extract l start stop` is strict on `[0, start)`, lazy on `[start, stop]`.
+-/
 def extract (l : LazyList α) (start : Nat) (stop : Nat := l.length) : LazyList α :=
   match l, start, stop with
   | nil, _, _ | _, _, 0 => nil
-  | x ::' xs, 0, n + 1 => x ::' extract xs.get 0 n
+  | x ::' xs, 0, n + 1 => x ::' ↑(extract xs.get 0 n)
   | _ ::' xs, n + 1, n' + 1 => extract xs.get n n'
+/--
+  - LAZINESS
+  `filter f l` is lazy after the first `x` where `x ∈ l ∧ f x`. That is,
+  it terminates if `∃x ∈ l, f x -> true` otherwise not.
+-/
 def filter (f : α -> Bool) (l : LazyList α) : LazyList α :=
   match l with
   | nil => nil
   | x ::' xs =>
-    if f x then x ::' filter f xs.get
+    if f x then x ::' ↑(filter f xs.get)
     else filter f xs.get
 @[inline] def filterTR (f : α -> Bool) (l : LazyList α) : LazyList α := go f #[] l |> ofArray where
   go f acc
   | nil => acc | x ::' xs => go f (if f x then acc.push x else acc) xs.get
+/--
+  - LAZINESS
+  `filterMap f l` is lazy after the first `x` where `x ∈ l ∧ (f x -> some _)`. That is,
+  it terminates if `∃x ∈ l, f x -> some _` otherwise not.
+-/
 def filterMap (f : α -> Option β) (l : LazyList α) : LazyList β :=
   match l with
   | nil => nil
@@ -449,6 +540,10 @@ def filterMap (f : α -> Option β) (l : LazyList α) : LazyList β :=
 @[inline] def filterMapTR (f : α -> Option β) (l : LazyList α) : LazyList β := go #[] l |> ofArray where
   go acc
   | nil => acc | x ::' xs => go (if let (some x) := f x then acc.push x else acc) xs.get
+/--
+  - LAZINESS
+  Like `mapM`, `filterMapM f l` is strict.
+-/
 def filterMapM [Monad m] (f : α -> m (Option β)) : LazyList α -> m (LazyList β)
   | nil => pure nil
   | x ::' xs =>
@@ -457,23 +552,33 @@ def filterMapM [Monad m] (f : α -> m (Option β)) : LazyList α -> m (LazyList 
             | some x =>
               (x ::' ·) <$> filterMapM f xs.get
 
+/--
+  guarantees laziness
+-/
 def flatten : LazyList (LazyList α) -> LazyList α
   | nil => nil
   | x ::' xs => x ++ flatten xs.get
+/--
+  guarantees laziness
+-/
 def flatMap (f : α -> LazyList β) : LazyList α -> LazyList β
   | nil => nil
   | x ::' xs => f x ++ flatMap f xs.get
 @[inline] def flatMapTR (f : α -> LazyList β) (l : LazyList α) : LazyList β := l.foldl (· ++ f ·) nil
 @[inline] def flattenTR {α} l := show LazyList α from flatMapTR id l
+/--
+  - LAZINESS
+  Like `mapM`, `flatMapM f l` is strict.
+-/
 def flatMapM [Monad m] (f : α -> m (LazyList β)) : LazyList α -> m (LazyList β)
   | nil => pure nil
   | x ::' xs =>
     (· ++ ·) <$> f x <*> flatMapM f xs.get
 
 /--
-  Generate a potentially infinity sequence of objects of `(S, 0, 1, +, <)`,
+  Generate a potentially infinite sequence of objects of `(S, 0, 1, +, <)`,
   with upper bound and lower bound being `start stop`,
-  incremented by `step`.
+  incremented by `step`, guarantees laziness.
   Note that the commutativity of `(· + ·)` isn't enforced.
   Special cases are listed below:
   - generates an infinite lazy sequence if
@@ -495,10 +600,10 @@ def flatMapM [Monad m] (f : α -> m (LazyList β)) : LazyList α -> m (LazyList 
 partial def gen [Add α] [Zero α] [One α] [LT α] [DecidableLT α]
   (start : α := 0) (stop : Option α := none) (step : α := 1) : LazyList α :=
   match stop with
-  | none => start ::' gen (start + step) stop step
+  | none => start ::' ↑(gen (start + step) stop step)
   | s@(some x) =>
     if x > start then
-      start ::' gen (start + step) s step
+      start ::' ↑(gen (start + step) s step)
     else
       nil
 
@@ -507,7 +612,7 @@ def ints start (step : Int := 1) := show LazyList Int from gen start (step := st
 attribute [always_inline, inline, inherit_doc gen] nats ints
 
 /--
-  Generate a sequence of number from `Std.Range`. Guarantees termination.
+  Generate a sequence of number from `Std.Range`. guarantees termination.
 -/
 @[always_inline, inline] def fromRange : Std.Range -> LazyList Nat
   | {start, step, stop,..} => gen start stop step
@@ -643,11 +748,8 @@ instance decidableForall (P : α -> Prop) [DecidablePred P] :
                  | y, Mem.step _ hstep => h' y hstep
       | isFalse h' =>
         isFalse $ λ nh =>
-        let ⟨w, h'⟩ := Classical.not_forall.mp h'
-        let h' := not_imp.mp h'
-        h'.2 $ nh w $ Mem.step x h'.1
+          h' λ n nh' => nh n (Mem.step x nh')
     else isFalse $ λ nh => h $ nh x $ Mem.head xs.get
-
 instance [DecidableEq α] : DecidableRel (Subset : LazyList α -> LazyList α -> Prop) :=
   fun _ _ => decidableForall _ _
 
@@ -688,9 +790,8 @@ macro_rules
       (expand · l (l &&& 1 == 0)) =<< ``(Thunk.pure LazyList.nil)
 
 instance : ToStream (LazyList α) (LazyList α) := ⟨id⟩
-end LazyList
 
-open LazyList
+end LazyList
 
 structure LazyListD (α : Type u) (n : Nat) where
   data : LazyList α
@@ -713,4 +814,5 @@ instance : GetElem (LazyListD α n) Nat α fun _ i => i < n where
 inductive Mem {α n} (a : α) (as : LazyListD α n) : Prop where
   | mk : a ∈ as.data -> Mem a as
 instance : Membership α (LazyListD α n) := ⟨flip Mem⟩
+
 end LazyListD
