@@ -1,9 +1,12 @@
-@[extern "lean_string_repeat"] def leanStringRepeat (c : Char) (n : Nat) : String :=
+@[extern "lean_string_repeat"] def leanStringRepeat (c : @&Char) (n : @&Nat) : String :=
   go c "" n where
   go c acc
   | 0 => acc
   | n + 1 => go c (acc.push c) n
 
+/--
+  `n` is `uint32_t` in runtime. Overflow is wrapped.
+-/
 @[always_inline, inline] def Char.repeat (c : Char) (n : Nat) : String :=
   leanStringRepeat c n
 
@@ -12,7 +15,6 @@
 namespace PrettyPrint
 --                      cmd      info
 abbrev Spec := Array $ String × String
-
 
 def calcMaxWidth (s : Spec) : Nat :=
   s.foldl (init := 0) (·.max ∘ (·.fst.length))
