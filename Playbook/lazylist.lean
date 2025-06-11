@@ -705,17 +705,6 @@ private unsafe def mapMonoI [Monad m] (f : α -> m α) (as : LazyList α) : m $ 
 opaque mapMonoM [Monad m] : (α -> m α) -> LazyList α -> m (LazyList α)
 def mapMono (f : α -> α) (l : LazyList α) : LazyList α := Id.run $ mapMonoM f l
 
-partial def String.search (pat text : String) : Option Nat :=
-  let (lPat, lText) := (pat.length, text.length)
-  let rec go j k :=
-    if j == lPat then some $ k - j
-    else if k == lText then none
-    else if pat.get ⟨j⟩ == text.get ⟨k⟩ then
-      go (j + 1) (k + 1)
-    else
-      go 0 (k - j + 1)
-  go 0 0
-
 protected def Subset (xs ys : LazyList α) := ∀ ⦃a : α⦄, a ∈ xs -> a ∈ ys
 instance : HasSubset (LazyList α) := ⟨LazyList.Subset⟩
 
@@ -770,6 +759,13 @@ def firstM [Alternative m] (f : α -> m β) : LazyList α -> m β
   | x ::' xs => f x <|> firstM f xs.get
 @[always_inline, inline, inherit_doc firstM] def asum := @firstM
 
+/--
+  The notation `[|...|]` is used to construct a literal of this type.
+
+  e.g. `[|1,2,3|] = 1 ::' 2 ::' 3 ::' nil`. Note that
+  - `[||] = nil` where `nil = (nil : LazyList α)`
+  - `[|_,_|] = .. ::' nil` where `nil = (↑nil : Thunk (LazyList α))`
+-/
 syntax (name := «term[|_|]») "[|" withoutPosition(term,*,?) "|]" : term
 
 recommended_spelling "nil" for "[||]" in [LazyList.nil, «term[|_|]»]

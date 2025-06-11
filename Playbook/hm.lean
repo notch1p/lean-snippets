@@ -86,13 +86,10 @@ private partial def atom : TParser Expr :=
         , ws condExp
         , ws intExp
         , ws strExp]
--- partial def exp := atom >>= fun x =>
---   (takeMany1 (spaces *> atom <* spaces) >>= fun xs => return Array.foldl App x xs) <|> return x
 
 
-partial def exp := do
-  let a <- atom
-  foldl App a (spaces *> atom <* spaces)
+private partial def exp : TParser Expr :=
+  chainl1 atom (pure App)
 
 private partial def prodExp : TParser Expr := do
   let e <- exp
@@ -121,9 +118,6 @@ private partial def funExp  : TParser Expr := do
 private partial def condExp : TParser Expr := do
   IF; let c <- exp; THEN; let e₁ <- exp; ELSE; let e₂ <- exp  return Cond c e₁ e₂
 
-private partial def appExp' : TParser Expr :=
-  chainl1 atom (pure App)
-
 end
 def parse (s : String) : Except String Expr :=
   match Parser.run (spaces *> exp <* endOfInput) s with
@@ -131,6 +125,7 @@ def parse (s : String) : Except String Expr :=
   | .error _ e => throw (toString e)
 
 end Parsing
+
 
 def List.rmDup [BEq α] [Hashable α] (l : List α) : List α :=
   let s : Std.HashSet α := ∅
@@ -353,7 +348,7 @@ def infer (E : Env) : Expr -> Infer σ (Subst × MLType)
     let (s₂, t₂) <- infer (apply s₁ E) e₂
     pure (s₂ ∪' s₁, (apply s₂ t₁) ×'' t₂)
 
-  | CB _ => pure (∅, tBool)   | CI _  => pure (∅, tInt) 
+  | CB _ => pure (∅, tBool)   | CI _  => pure (∅, tInt)
   | CS _ => pure (∅, tString) | CUnit => pure (∅, tUnit)
 end
 
@@ -413,12 +408,12 @@ mutual
 
 partial def callForeign (as : List Value) : Nat -> Value
   | t@0 | t@1 | t@2 | t@3 =>
-    if let (VI i, VI i') := (as[0]!, as[1]!) then 
+    if let (VI i, VI i') := (as[0]!, as[1]!) then
       VI $ (binop t) i i'
     else unreachable!
 
-  | 4 => 
-    if let (VB b) := as[0]! then 
+  | 4 =>
+    if let (VB b) := as[0]! then
       VB $ b.not
     else unreachable!
 
@@ -492,12 +487,12 @@ def prim' : VEnv := ⟨.ofList prim⟩
 
 scoped macro n:term "of!" s:term : term => `(($n, (ag (String.push $n '\'') ⟨$s, by omega⟩ prim')))
 abbrev defaultVE : VEnv where
-  env := .ofList $ prim 
+  env := .ofList $ prim
   ++ [ "add" of! 2
      , "sub" of! 2
      , "mul" of! 2
      , "div" of! 2
-     , "eq"  of! 2] 
+     , "eq"  of! 2]
   ++ [ ("zero",  eval! "0" prim')
      , ("succ",  eval! "fun x -> add' (x,1)" prim')]
 
@@ -519,5 +514,6 @@ open MLType IO in def main : IO Unit := do
     print prompt
     let input <- IO.FS.Stream.getLine stdin
     if input.isEmpty then return ()
+    else if input.startsWith "\n" then continue
     else match check1E input defaultE defaultVE with
          | .error s | .ok s => println! s
