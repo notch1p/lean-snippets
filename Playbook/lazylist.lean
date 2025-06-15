@@ -787,6 +787,23 @@ macro_rules
 
 instance : ToStream (LazyList α) (LazyList α) := ⟨id⟩
 
+def beq.refl [BEq α] [ReflBEq α] {as : LazyList α} : (as == as) = true := 
+  match as with
+  | [||] => nil_beq_nil
+  | x ::' xs => by simp[BEq.beq, beq, -Thunk.get]; exact beq.refl
+
+instance [BEq α] [ReflBEq α] : ReflBEq (LazyList α) := ⟨beq.refl⟩
+def beq.eq_of_beq [BEq α] [LawfulBEq α] {as bs : LazyList α} : (as == bs) = true -> as = bs := λ h =>
+  match h' : as with
+  | nil => by cases bs <;> first | rfl | simp_all[BEq.beq, beq]
+  | cons x xs => by
+    cases bs with
+    | nil => simp_all[BEq.beq, beq]
+    | cons x xs => 
+      simp_all[BEq.beq, beq]
+      exact Thunk.ext $ beq.eq_of_beq h.2
+instance [BEq α] [LawfulBEq α] : LawfulBEq (LazyList α) := ⟨beq.eq_of_beq⟩
+
 end LazyList
 
 structure LazyListD (α : Type u) (n : Nat) where
