@@ -1,10 +1,11 @@
+import Lean
 /--
   A LazyList (in which the elements are computed lazily) of type `α`.
   The notation `[|...|]` is used to construct a literal of this type.
 
   e.g. `[|1,2,3|] = 1 ::' 2 ::' 3 ::' nil`. Note that
   - `[||] = nil` where `nil = (nil : LazyList α)`
-  - `[|_,_|] = .. ::' nil` where `nil = (↑nil : Thunk (LazyList α))`
+  - `[|_,..|] = .. ::' nil` where `nil = (↑nil : Thunk (LazyList α))`
 
   **Any side effect within the elements is evaluated just once.**
   - Most tailrec variants of the methods (and catamorphisms) on lazy list (whose identifier ends with 'TR') in this module, 
@@ -21,7 +22,6 @@ inductive LazyList (α : Type u)
 namespace LazyList
 attribute [scoped simp, scoped grind] Thunk.get
 infixr : 65 " ::' " => LazyList.cons
-
 private def const {α β} (x : α) := fun (_ : β) => x
 private def const2 {α β} (_ : α) (y : β) := y
 attribute [inline, always_inline] const const2
@@ -294,11 +294,11 @@ attribute [always_inline, inline] getLastI getLast?I getLast!I getLastDI
 -/
 @[implemented_by getLastI] def getLast : (as : LazyList α) -> as ≠ nil -> α
   | x ::' xs, _ =>
-    match h' : xs.get with
+    match _ : xs.get with
     | nil => x
     | (y ::' ys) => getLast (y ::' ys) cons_ne_nil
 termination_by as _ => as
-decreasing_by simp[-Thunk.get, h']; omega
+decreasing_by next _ _ h' => simp[-Thunk.get, h']; omega
 @[implemented_by getLast!I] def getLast! [Inhabited α] : LazyList α -> α
   | nil => panic! "out of bounds"
   | x ::' xs => if xs.get matches nil then x else getLast! xs.get
@@ -574,41 +574,60 @@ def flatMapM [Monad m] (f : α -> m (LazyList β)) : LazyList α -> m (LazyList 
   | nil => pure nil
   | x ::' xs =>
     (· ++ ·) <$> f x <*> flatMapM f xs.get
-
+  #check List.zipWith
 /--
-  Generate a potentially infinite sequence of objects of `(S, 0, 1, +, <)`,
-  with upper bound and lower bound being `start stop`,
-  incremented by `step`, guarantees laziness.
+  guarantees laziness
+-/
+def zipWith (f : α -> β -> γ) : LazyList α -> LazyList β -> LazyList γ
+  | nil, _ => nil
+  | _, nil => nil
+  | x ::' xs, y ::' ys => f x y ::' zipWith f xs.get ys.get
+/--
+  guarantees laziness.
+  `zip xs ys = zipWith (· , ·) xs ys`
+-/
+@[inline]def zip : LazyList α -> LazyList β -> LazyList (α × β) := zipWith (· , ·)
+/--
+  Generate a potentially infinite sequence of objects of `(S, 0, 1, +, <)`, guarantees laziness.
   Note that the commutativity of `(· + ·)` isn't enforced.
-  Special cases are listed below:
+  Codepaths are duplicated on purpose to avoid extra comparing and destructuring.
+
   - generates an infinite lazy sequence if
     lower bound not provided (this is the case of `nats` and `ints`).
-  - generates an infinite **constant** lazy sequence if `step = 0` and `stop ≠ start`
   - generates an infinite **decreasing** lazy sequence if
-    `stop > start` and `step <= 0`. (this is the case `ints` if set to countdown)
-  - generates nothing if `start <= stop`.
-
+    `start > stop` and `step < 0`. (this is the case `ints` if set to countdown)
   (That is, if every instances involved above are implemented in a common-sense way.)
 
-  e.g.
+  - This function is usually accessed through the notation `[|start ~~ stop : step|]` and
+    used in conjunction with list comprehension:
+
   ```lean4
-  gen |>.filter (· ^ 2 > 4) = [x | x <- [0..], x ^ 2 > 4]
-                            = [3, ⋯]
-                   take 3 _ = [3, 4, 5]
+  gen 0 |>.filter (· ^ 2 > 4) = [|id <- [|0~~|], (· ^ 2 > 4)|]
+                              = [3, ⋯]
+                     take 3 _ = [3, 4, 5]
+  ∀ x ∈ gen 1, x > 0  = ∅ -- diverge as the whole list is forced.
+  ∃ x ∈ gen 1, x > 20 = true
   ```
 -/
 partial def gen [Add α] [Zero α] [One α] [LT α] [DecidableLT α]
-  (start : α := 0) (stop : Option α := none) (step : α := 1) : LazyList α :=
-  match stop with
-  | none => start ::' ↑(gen (start + step) stop step)
-  | s@(some x) =>
-    if x > start then
-      start ::' ↑(gen (start + step) s step)
-    else
-      nil
+  (start : α) (stop : Option α) (step : α) : LazyList α :=
+  if step > 0 then stepPos start stop else stepNeg start stop where
 
-def nats (start := 0) (step := 1) := show LazyList Nat from gen start (step := step)
-def ints start (step : Int := 1) := show LazyList Int from gen start (step := step)
+  goInf start := start ::' ↑(goInf (start + step))
+  stepPos start stop :=
+    let rec go start stop := if stop > start 
+                             then start ::' ↑(go (start + step) stop)
+                             else nil
+    if let some stop := stop then go start stop else goInf start
+
+  stepNeg start stop :=
+    let rec go start stop := if stop < start 
+                             then start ::' ↑(go (start + step) stop)
+                             else nil
+    if let some stop := stop then go start stop else goInf start
+attribute [inline] gen.stepPos gen.stepNeg gen
+def nats (start := 0) (step := 1) := show LazyList Nat from gen start none step
+def ints start (step : Int := 1) := show LazyList Int from gen start none step
 attribute [always_inline, inline, inherit_doc gen] nats ints
 
 /--
@@ -616,6 +635,7 @@ attribute [always_inline, inline, inherit_doc gen] nats ints
 -/
 @[always_inline, inline] def fromRange : Std.Range -> LazyList Nat
   | {start, step, stop,..} => gen start stop step
+
 inductive Mem (a : α) : (as : LazyList α) -> Prop where
   | head (xs : LazyList α) : Mem a $ a ::' xs
   | step (x : α) {xs : LazyList α} : Mem a xs -> Mem a (x ::' xs)
@@ -764,17 +784,23 @@ def firstM [Alternative m] (f : α -> m β) : LazyList α -> m β
 
   e.g. `[|1,2,3|] = 1 ::' 2 ::' 3 ::' nil`. Note that
   - `[||] = nil` where `nil = (nil : LazyList α)`
-  - `[|_,_|] = .. ::' nil` where `nil = (↑nil : Thunk (LazyList α))`
+  - `[|_,..|] = .. ::' nil` where `nil = (↑nil : Thunk (LazyList α))`
 -/
 syntax (name := «term[|_|]») "[|" withoutPosition(term,*,?) "|]" : term
 
+/--
+  The notation for list comprehension.
+  `[|f <- l, p|]` = l.map f <| l.filter p`
+-/
+syntax "[|" term (" ← " <|> " <- ") term (" , " term)? "|]" : term
+@[inherit_doc gen] syntax "[|" term " ~~ " (term)? (" : " term)? "|]" : term
 recommended_spelling "nil" for "[||]" in [LazyList.nil, «term[|_|]»]
 recommended_spelling "singleton" for "[|a|]" in [LazyList.cons, «term[|_|]»]
 
 open Lean in
 macro_rules
   | `([| $elems,* |]) =>
-    let rec expand (result : TSyntax `term) : Nat -> Bool -> MacroM Syntax
+    let rec expand (result : TSyntax `term)
       | 0, _ => pure result
       | i + 1, true => expand result i false
       | i + 1, false =>
@@ -785,7 +811,35 @@ macro_rules
     else
       (expand · l (l &&& 1 == 0)) =<< ``(Thunk.pure LazyList.nil)
 
+  | `([| $start ~~ $(stop)? $[: $step]? |]) => do
+    let stop <- if let .some e := stop then ``(Option.some $e) else ``(Option.none)
+    let step <- if let .some e := step then pure e else ``(One.one)
+    ``(LazyList.gen $start $stop $step)
+
+  | `([| $f <- $l $[, $p]? |]) =>
+    match p with 
+    | none => ``(LazyList.map $f $l)
+    | some p => ``(LazyList.map $f (LazyList.filter $p $l))
+  | `([| $f ← $l $[, $p]? |]) => ``([| $f <- $l $[, $p]? |])
+
 instance : ToStream (LazyList α) (LazyList α) := ⟨id⟩
+
+theorem beq.refl [BEq α] [ReflBEq α] {as : LazyList α} : (as == as) = true := 
+  match as with
+  | [||] => nil_beq_nil
+  | x ::' xs => by simp[BEq.beq, beq, -Thunk.get]; exact beq.refl
+
+instance [BEq α] [ReflBEq α] : ReflBEq (LazyList α) := ⟨beq.refl⟩
+theorem beq.eq_of_beq [BEq α] [LawfulBEq α] {as bs : LazyList α} : (as == bs) = true -> as = bs := λ h =>
+  match h' : as with
+  | nil => by cases bs <;> first | rfl | simp_all[BEq.beq, beq]
+  | cons x xs => by
+    cases bs with
+    | nil => simp_all[BEq.beq, beq]
+    | cons x xs => 
+      simp_all[BEq.beq, beq]
+      exact Thunk.ext $ beq.eq_of_beq h.2
+instance [BEq α] [LawfulBEq α] : LawfulBEq (LazyList α) := ⟨beq.eq_of_beq⟩
 
 end LazyList
 

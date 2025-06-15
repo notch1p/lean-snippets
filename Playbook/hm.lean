@@ -189,8 +189,7 @@ instance : ToString Env where
   toString e := e.toList.foldl (init := "") fun a (v, t) => s!"{v} : {t} " ++ a
 
 def curry : MLType -> MLType
-  | t₁ ->' t₂@(TCon _)
-  | t₁ ->' t₂@(TVar _) =>
+  | t₁ ->' t₂ =>
     go t₁ |>.foldr (· ->' ·) t₂
   | t => t
 where
@@ -383,13 +382,13 @@ inductive Value where
   | VI (i : Int) | VB (b : Bool) | VS (s : String) | VU
   | VF (s : Symbol) (e : Expr) (e : VEnv)
   | VOpaque (s : Nat)
-  | VEvalError
+  | VEvalError (s : String)
   | VP (e₁ e₂ : Value) deriving Nonempty, Repr
 end
-instance : Inhabited Value := ⟨.VEvalError⟩
+instance : Inhabited Value := ⟨.VEvalError "something wrong during evaluation. Likely implementation error."⟩
 def Value.toStr
-  | VI v | VB v | VS v => toString v | VU => toString ()
-  | VEvalError => s!"something wrong during evaluation. Likely implementation error."
+  | VI v | VB v | VS v => reprStr v | VU => toString ()
+  | VEvalError s => s
   | VOpaque s  => s!"<${s}::opaque>"
   | VF _ _ _   => "<fun>"
   | VP v₁ v₂   => toStr v₁ ++ "," ++ toStr v₂
@@ -418,12 +417,15 @@ partial def callForeign (as : List Value) : Nat -> Value
     else unreachable!
 
   | 5 =>
-    let rec go
-      | VI i, VI i' | VB i, VB i' | VS i, VS i' => i == i'
-      | VU, VU => true
-      | VP l r, VP l' r' => (go l l' && go r r')
+    let rec go : Value -> Value -> Except Value Bool
+      | VI i, VI i' | VB i, VB i' | VS i, VS i' | VOpaque i, VOpaque i' =>
+        pure $ i == i'
+      | VU, VU => pure true
+      | VF .., VF .. => throw $ VEvalError s!"equality handler is not implemented for function type"
+      | VP l r, VP l' r' => (· && ·) <$> go l l' <*> go r r'
       | _, _ => unreachable!
-    VB $ go as[0]! as[1]!
+    match go as[0]! as[1]! with
+    | .ok x => VB x | .error e => e
   | n => .VOpaque n
 
 partial def eval (E : VEnv) : Expr -> Except TypingError Value
