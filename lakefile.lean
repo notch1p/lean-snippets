@@ -10,6 +10,9 @@ package «playbook» where
 lean_lib «Playbook» where
   -- add library configuration options here
 
+lean_lib «Lazylist» where
+  roots := #[`Playbook.lazylist]
+
 @[default_target]
 lean_exe "doug" where
   root := `Main

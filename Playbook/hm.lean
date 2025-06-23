@@ -401,11 +401,8 @@ def binop : Nat -> Int -> Int -> Int
   | 0 => (· + ·) | 1 => (· - ·) | 2 => (· * ·) | 3 => (· / ·)
   | _ => panic! "Not defined"
 
-open Value in
-instance : ToString Value := ⟨Value.toStr⟩ in
-mutual
-
-partial def callForeign (as : List Value) : Nat -> Value
+open Value in instance : ToString Value := ⟨Value.toStr⟩ in
+def callForeign (as : List Value) : Nat -> Value
   | t@0 | t@1 | t@2 | t@3 =>
     if let (VI i, VI i') := (as[0]!, as[1]!) then
       VI $ (binop t) i i'
@@ -427,7 +424,7 @@ partial def callForeign (as : List Value) : Nat -> Value
     match go as[0]! as[1]! with
     | .ok x => VB x | .error e => e
   | n => .VOpaque n
-
+in
 partial def eval (E : VEnv) : Expr -> Except TypingError Value
   | CI v => pure $ VI v | CS v => pure $ VS v | CB v => pure $ VB v | CUnit => pure VU
   | Var x => match E.env.get? x with | some x => pure x | none => throw $ Undefined x
@@ -455,10 +452,9 @@ partial def eval (E : VEnv) : Expr -> Except TypingError Value
     | _       => throw $ WrongCardinal 2
   | Prod' e₁ e₂ => do
     pure $ VP (<-eval E e₁) (<-eval E e₂)
-end
 
-@[always_inline, inline]def parse! s := Parsing.parse s |>.toOption |>.get!
-@[always_inline, inline]def eval! s (e : VEnv := ⟨∅⟩) := parse! s |> eval e |>.toOption |>.get!
+@[always_inline, inline] def parse! s := Parsing.parse s |>.toOption |>.get!
+@[always_inline, inline] def eval! s (e : VEnv := ⟨∅⟩) := parse! s |> eval e |>.toOption |>.get!
 
 def arityGen (prim : Symbol) (arity : Nat) (primE : VEnv := ⟨∅⟩) : Value :=
   let rec go s
