@@ -23,6 +23,7 @@ lean_exe "arith" where
 lean_exe "hm" where
   root := `Playbook.hm
 
+
 lean_exe "threading" where
   root := .str `Playbook "threading-ignored"
 
@@ -84,6 +85,5 @@ extern_lib libleanffi pkg := do
   buildStaticLib (pkg.staticLibDir / name) #[ffiO]
 
 
--- require Parser from git "https://github.com/fgdorais/lean4-parser"@"cf2e6083f25670588dfe057578774974d6a1347e"
-require Parser from git "https://github.com/fgdorais/lean4-parser"@"main"
-require "leanprover-community" / "mathlib"@ git "v4.20.1"
+require Parser from git "https://github.com/fgdorais/lean4-parser"@"2dc91a042f721dc852129b269e0ac4f144fe54c4"
+require "leanprover-community" / "mathlib" @ git "v4.21.0"
