@@ -42,6 +42,8 @@ For vertical composition of natural transformations we just use ≫. For horizon
 -/
 def help := ()
 
+notation:80 f:50 " ⊚ " g:51 => CategoryTheory.CategoryStruct.comp g f
+
 section «1.1.1»
 open Function
 variable [Nontrivial X] [Nontrivial Y] [Nontrivial Z]
@@ -141,3 +143,10 @@ example {f : A ⟶ B} [h₁ : Mono f] (h₂ : SplitEpi f) : IsIso f where
   out := ⟨h₂.section_, by simp[h₁.right_cancellation (f ≫ h₂.section_) (𝟙 A)], h₂.id⟩
 
 end «1.1»
+
+section «1.2.1»
+open CategoryTheory
+variable [instC : Category 𝒞] {A B C : 𝒞}
+
+
+end «1.2.1»

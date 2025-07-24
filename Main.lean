@@ -1,5 +1,34 @@
 import Playbook.doug
 
+
+def parseArgs : List String -> (c : Config) -> (s : List System.FilePath) -> (Option Config) × List System.FilePath
+  | [], c, s => (c, s)
+  | x :: xs, c, s =>
+    match x with
+    |"-h"  | "--help"   => (none, [])
+           | "--"       => (c, xs.map Coe.coe)
+           | "--ascii"  => parseArgs xs {c with useASCII   := true}  s
+    | "-a" | "--hidden" => parseArgs xs {c with showHidden := true}  s
+    | "-s" | "--synced" => parseArgs xs {c with synced     := false} s
+    | "-p" | "--plain"  => parseArgs xs {c with color      := false} s
+           | "--async"  =>
+             match xs with
+             | [] => panic! "expecting number after --asyncdepth"
+             | y :: ys => parseArgs ys {c with asyncdepth := y.toNat!} s
+    | "-o" | "--out"    =>
+      match xs with
+      | [] => panic! "expecting filepath after --output"
+      | y :: ys => parseArgs ys {c with output := y} s
+    | "-d" | "--depth"  =>
+      match xs with
+      | [] => panic! "expecting number after --depth"
+      | y :: ys => parseArgs ys {c with maxdepth := y.toNat!} s
+    | p                 => if p.startsWith "-"
+                           then (none, [p])
+                           else parseArgs xs c (p :: s)
+
+/-
+set_option maxHeartbeats 10000000 in
 mutual
 
 partial def configFromArgs : List String -> (c : Config := {}) -> (s : List System.FilePath := []) -> (Option Config) × List System.FilePath
@@ -7,13 +36,6 @@ partial def configFromArgs : List String -> (c : Config := {}) -> (s : List Syst
   | x :: xs, c, s =>
     modifyConfig xs s x c
   termination_by ls => (sizeOf ls, 0) -- proof is too large.
-  decreasing_by
-    simp
-    · apply Prod.Lex.left
-      case h =>
-        simp
-        apply Nat.pos_of_neZero
-
 
 partial def modifyConfig (xs : List String) (s : List System.FilePath) : String -> Config -> (Option Config) × List System.FilePath
   |"-h", _  | "--help",   _ => (none, [])
@@ -35,34 +57,42 @@ partial def modifyConfig (xs : List String) (s : List System.FilePath) : String 
     match xs with
     | [] => (some c, s)
     | y :: ys =>
-      match y.toNat? with
-      | some n => configFromArgs ys {c with maxdepth := n} s
-      | none => modifyConfig ys s y c
+      configFromArgs ys {c with maxdepth := y.toNat!} s
   | p, c => if p.startsWith "--"
             || p.startsWith "-"
             then (none, [""]) else configFromArgs xs c (p :: s)
   termination_by (sizeOf xs, 1)
 
 end
-
+-/
 open IO in
 def main (args : List String) : IO UInt32 := do
-  match configFromArgs args with
-  | (some config@{maxdepth,..}, s) =>
+  match parseArgs args {} [] with
+  | (some config@{maxdepth,output,asyncdepth,..}, s) =>
     let cwd <- IO.currentDir
     let fs := if s.isEmpty then [cwd] else s
     let template d : IO String := do
       let s <- mkRef ∅
-      dirTree d maxdepth s |>.run config
+      dirTree d maxdepth asyncdepth s |>.run config
       let {s, fdCount := (d, f)} <- s.get
       return s ++ boldYellow
           s!"Total of {f} files, in {d} dirs"
           config.color
     let workseq <- fs |>.mapM fun d => template d |>.asTask
-    Task.mapList (·.forM $ println ∘ fun | .error e => e | .ok s => s) workseq |>.get
+    if let some s := output then
+      FS.withFile s .append fun handle =>
+        Task.mapList
+          (·.forM $ handle.putStr ∘ toString ∘ fun | .error e => e | .ok s => s)
+          workseq
+        |>.get
+    else
+      Task.mapList
+        (·.forM $ println ∘ fun | .error e => e | .ok s => s)
+        workseq
+      |>.get
     return 0
   | (none, []) => printHelp; return 0
-  | (none, _) =>
+  | (none, s) =>
     printHelp
-    eprintln s!"Unknown args in {repr args}\n"
+    eprintln s!"Unknown arg {s} in {args}\n"
     return 1
