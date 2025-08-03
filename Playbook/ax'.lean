@@ -52,19 +52,34 @@ example (n : Nat) : 0 + n = n :=
         _ = (0 + n).succ := rfl
         _ = n.succ := by rw[ih])
 
-#check 0
-
 unsafe inductive Bad where 
   | bad : (Bad -> Bad) -> Bad
+
+unsafe def mkBad : Bad -> Bad
+  | k@(.bad k') => k' k
+
+unsafe def ω : Bad := mkBad (.bad mkBad)
 
 unsafe def collapse : Bad -> False
   | .bad k => collapse $ k (.bad k)
 unsafe def consBad : False -> Bad := False.elim
 
-#check Bad.bad (consBad ∘ collapse)
+noncomputable unsafe example {C} (b : Bad) : C :=
+  b.recOn (motive := fun _ => C)
+    fun f step => step (.bad f)
 
 unsafe example {C} : C := 
   False.elim $ collapse $ .bad $ consBad ∘ collapse
+
+unsafe inductive Bad' where
+  | bad' : (Bad' -> Empty) -> Bad'
+
+unsafe def recBad' : Bad' -> Empty
+  | .bad' f => f (.bad' f)
+
+unsafe example {C} : C :=
+  let bot : Empty := recBad' (.bad' recBad')
+  bot.elim
 
 example [Decidable p] : ¬¬p -> p := Decidable.not_not.mp
 example : ¬¬p -> p := Classical.not_not.mp
