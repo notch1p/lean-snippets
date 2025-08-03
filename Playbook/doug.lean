@@ -1,4 +1,4 @@
-import Playbook.ffidecl
+import Playbook.dependentPP
 structure Config where
   useASCII := false
   currentPrefix := ""
@@ -120,9 +120,12 @@ partial def dirTree (path : System.FilePath) (maxdepth : Nat) (asyncdepth : Nat)
         locally inDirectory for i in contents do
           dirTree i.path (maxdepth - 1) asyncdepth res
 
-abbrev nb := "NB."
+section open PrettyPrint
+abbrev nb := ""
 
-abbrev help :=
+abbrev header := ["Arg", "NB."]
+
+abbrev help : TableOf header :=
   #[ ("--ascii"           , "Output using ASCII characters")
    , ("--async <n>"       , "Experimental async subdir traversal mode")
    , (nb                  , "enable async recursion for funcalls not deeper than <n>")
@@ -137,14 +140,11 @@ abbrev help :=
    , (nb                  , "anything beyond this point is considered a path.")
    , ("--help, -h"        , "Show this help string")]
 
-
-
-open PrettyPrint in
 abbrev printHelp := println! "\
-USAGE: doug [-nc|a|d|p|h|o] [--] [dirs] -- Display a tree-like view of your dirs
-PARAMS:
-{formatMsg help}
+USAGE: doug [-nc|a|d|p|h|o] [--] [dirs] -- Display a tree-like view of your dir:
+{tabulate "PARAMS" {align := (.right, .left), margin := 2} help}
 Notes on async mode:
   by default each dir specified in <dirs> is computed asynchronously.
   there's also a experimental switch to enable this for subdirs.\
 "
+end
