@@ -7,12 +7,21 @@ infixr : 60 " $> " => flip Functor.mapConst
 
 abbrev Symbol := String
 
+inductive Pattern where
+  | PVar (x : Symbol)
+  | PWild
+  | PCtor (name : String) (args : Array Pattern)
+  deriving Repr, BEq, Inhabited
+open Pattern
+
 inductive Expr where
   | CI (i : Int)       | CS (s : String)        | CB (b : Bool) | CUnit
   | App (e₁ e₂ : Expr) | Cond (e₁ e₂ e₃ : Expr) | Let (a : Symbol) (e₁ e₂ : Expr)
   | Fix (e : Expr)     | Fixcomb (e : Expr)
   | Var (s : Symbol)   | Fun (a : Symbol) (e : Expr)
   | Prod' (e₁ e₂ : Expr)
+  | Match (aginst : Expr) (discr : Array (Pattern × Expr))
+
 deriving Repr, BEq, Nonempty
 instance : Inhabited Expr := ⟨Expr.CUnit⟩
 
@@ -67,7 +76,12 @@ def spaces : TParser Unit :=
 abbrev ws (t : TParser α) := spaces *> t <* spaces
 
 def reserved := 
-  #["infixl", "infixr","let", "rec", "in", "fn", "fun", "=", "if", "else", "then", "->", ";;"]
+  #[ "infixl", "infixr", "match"
+   , "data"  , "type"  , "with"
+   , "let"   , "rec"   , "in"
+   , "fn"    , "fun"   , "="
+   , "if"    , "else"  , "then"
+   , "|"     , "->"    , ";;"]
 
 open ASCII in def ID' : TParser String :=
   withErrorMessage "identifier" do
@@ -75,10 +89,15 @@ open ASCII in def ID' : TParser String :=
   <$> (Char.toString <$> alpha')
   <*> foldl String.push "" alphanum'
 
-def ID : TParser String := do
+def ID : TParser Symbol := do
   let id <- ID'
   if reserved.contains id then throwUnexpectedWithMessage none s!"expected identifier, not keyword {id}"
   else ws $ pure id
+
+def isUpperInit (s : String) : Bool :=
+  if h : s.atEnd 0 = true then false
+  else (s.get' 0 h) >= 'A' && (s.get' 0 h) <= 'Z'
+
 abbrev kw (s : String) : TParser Unit := ws 
                                          $ withBacktracking
                                          $ withErrorMessage "keyword"
@@ -96,6 +115,11 @@ abbrev ARROW := kw "->"
 abbrev COMMA := kw ","
 abbrev REC   := kw "rec"
 abbrev END   := kw ";;"
+abbrev MATCH := kw "match"
+abbrev WITH  := kw "with"
+abbrev BAR   := kw "|"
+abbrev TYPE  := kw "type"
+abbrev DATA  := kw "DATA"
 
 abbrev ADD   := "+"
 abbrev SUB   := "-"
@@ -106,6 +130,7 @@ abbrev ATT   := "@@"
 
 abbrev INFIXL := kw "infixl"
 abbrev INFIXR := kw "infixr"
+
 
 end Lexing
 
@@ -144,6 +169,10 @@ partial def chainr1
 @[inline] def η₂ s :=
   fun e₁ e₂ => App (App s e₁) e₂
 
+@[inline] def η₂'
+  | App (App s _) _ => s
+  | s => s
+
 @[inline] def infixOp (op : Symbol) (e : α -> α -> α) : TParser $ α -> α -> α :=
   (kw op) *> pure e
 
@@ -174,6 +203,14 @@ def first'
         go m (Nat.le_of_lt this) (combine e f) (Stream.setPosition s savePos)
   go ps.size (Nat.le.refl) (Error.unexpected (<- getPosition) none)
 
+def Array.foldl1 [Inhabited α] (f : α -> α -> α) (arr : Array α) : α :=
+  let mf mx y := some $ match mx with | none => y | some x => f x y
+  arr.foldl mf none |>.get!
+
+def Array.foldr1 [Inhabited α] (f : α -> α -> α) (arr : Array α) : α :=
+  let mf x my := some $ match my with | none => x | some y => f x y
+  arr.foldr mf none |>.get!
+
 end helper
 
 open Associativity in
@@ -192,12 +229,12 @@ private partial def funapp : TParser Expr :=
   chainl1 atom (pure App)
 
 private partial def atom : TParser Expr :=
-  first' $ #[ parenthesized prodExp
-            , letrecExp                  , letExp
-            , fixpointExp                , funExp
-            , condExp                    , intExp
-            , strExp                     , varExp
-            , parenthesized opSection]
+  first' $ #[ parenthesized prodExp 
+            , letrecExp             , letExp
+            , fixpointExp           , funExp
+            , condExp               , matchExp
+            , intExp                , strExp
+            , varExp                , parenthesized opSection]
             |>.map ws
 
 private partial def prodExp : TParser Expr := do
@@ -208,10 +245,10 @@ private partial def prodExp : TParser Expr := do
          | _ + 2 => es[0:es.size - 1].foldr Prod' es[es.size - 1]
 
 private partial
-def between (l : Char) (t : TParser Expr) (r : Char) : TParser Expr :=
+def between (l : Char) (t : TParser α) (r : Char) : TParser α :=
   ws (char l) *> t <* ws (char r)
 private partial
-def parenthesized (t : TParser Expr) : TParser Expr := between '(' t ')'
+def parenthesized (t : TParser α) : TParser α := between '(' t ')'
 
 private partial def intExp      : TParser Expr := ws INT >>= pure ∘ CI
 
@@ -241,6 +278,92 @@ private partial def opSection   : TParser Expr := do
     | some e₁, _ =>               return Fun "x" $ op e₁ $ Var "x"
     | none, none =>               return Fun "x" $ Fun "y" $ op (Var "x") (Var "y")
   else unreachable!
+
+private partial def basePattern : TParser Pattern := do
+      (kw "_" *> pure PWild) 
+  <|> (parenthesized patApps)
+  <|> do
+        let id <- ID
+        if isUpperInit id then return PCtor id #[]
+        else return PVar id
+
+private partial def patApps : TParser Pattern := do
+  let hd <- basePattern
+  match hd with
+  | PCtor n #[] =>
+    PCtor n <$> takeMany basePattern
+  | _ => return hd
+
+/- Shunting-yard -/
+private partial def patWithOps : TParser Pattern := do
+  let tb <- get
+  let lhs <- patApps
+  let pairs <- takeMany do
+    let k <- ws $ opMatcher tb.keysArray
+    let rhs <- patApps
+    pure (k, rhs)
+
+  if pairs.isEmpty then
+    pure lhs
+  else
+    let out : List Pattern := [lhs]
+    let ops : List (Nat × Associativity × String) := []
+
+    let rec reduceWhile (out : List Pattern) (ops : List (Nat × Associativity × String))
+                        (prec : Nat) (assoc : Associativity)
+                        : List Pattern × List (Nat × Associativity × String) :=
+      match ops with
+      | [] => (out, ops)
+      | (pTop, _, cTop) :: ops' =>
+        let cond :=
+          match assoc with
+          | .leftAssoc  => decide $ prec <= pTop
+          | .rightAssoc => decide $ prec <  pTop
+        if cond then
+          match out with
+          | r :: l :: out' =>
+              let pat := PCtor cTop #[l, r]
+              reduceWhile (pat :: out') ops' prec assoc
+          | _ => (out, ops)
+        else
+          (out, ops)
+
+    let (out, ops) <- pairs.foldlM (init := (out, ops)) fun (out, ops) (k, rhs) => do
+      let some (opExpr, assoc) := tb.get? k | unreachable!
+      let expanded := η₂' $ opExpr (Var "_") (Var "_")
+      let ctorName <-
+        match expanded with
+        | Var op => pure op
+        | other  =>
+          throwUnexpectedWithMessage none
+            s!"Invalid match pattern with operator `{k.2}`:\n\
+               expansion {repr other} does not reduce to a constructor."
+
+      let prec := k.1
+      let (out', ops') := reduceWhile out ops prec assoc
+      return (rhs :: out', (prec, assoc, ctorName) :: ops')
+
+    let rec reduceAll (out : List Pattern) : List (Nat × Associativity × String) -> List Pattern
+      | [] => out
+      | (_, _, c) :: ops' =>
+        match out with
+        | r :: l :: out' =>
+            reduceAll (PCtor c #[l, r] :: out') ops'
+        | _ => out
+    let outFinal := reduceAll out ops
+    match outFinal with
+    | [p] => pure p
+    | _   => throwUnexpectedWithMessage none "Pattern operator parsing error (stack underflow)."
+
+private partial def matchDiscr  : TParser (Pattern × Expr) := do
+  let p <- patWithOps
+  ARROW let body <- parseExpr     return (p, body)
+
+private partial def matchExp    : TParser Expr := do
+  MATCH let e <- parseExpr; WITH 
+  let hd <- optional BAR *> matchDiscr
+  let tl <- takeMany (BAR *> matchDiscr)
+                                  return Match e (#[hd] ++ tl)
 
 private partial def letExp      : TParser Expr := do
   LET let id <- ID
@@ -275,52 +398,33 @@ private partial def parseExpr : TParser Expr :=
 
 end
 
-def infixlDecl : TParser (Symbol × Expr) := do
+def infixlDecl : TParser $ Binding ⊕ α := do
   INFIXL; let i <- intExp let s <- strExp
   match s, i with
   | CS op, CI i =>
     let op := op.trim
     ARROW let e <- parseExpr
     modify (·.insert (i.toNat, op) (η₂ e, .leftAssoc))
-    return (op, e)
-  | _, _ => unreachable!
+    return .inl (op, e)
+  | _, _ => pure $ .inl ("_", CUnit)
 
-def infixrDecl : TParser (Symbol × Expr) := do
+def infixrDecl : TParser $ Binding ⊕ α := do
   INFIXR; let i <- intExp let s <- strExp
   match s, i with
   | CS op, CI i =>
     let op := op.trim
     ARROW let e <- parseExpr
     modify (·.insert (i.toNat, op) (η₂ e, .rightAssoc))
-    return (op, e)
-  | _, _ => unreachable!
+    return .inl (op, e)
+  | _, _ => pure $ .inl ("_", CUnit)
 
-def letDecl : TParser Binding := do
-  LET; let id <- ID; let a <- takeMany ID; EQ; let b <- parseExpr;  return (id, a.foldr Fun b)
-def letrecDecl : TParser Binding := do
+def letDecl : TParser $ Binding ⊕ α := do
+  LET; let id <- ID; let a <- takeMany ID; EQ; let b <- parseExpr;  return .inl (id, a.foldr Fun b)
+def letrecDecl : TParser $ Binding ⊕ α := do
   LET;
-  REC; let id <- ID; let a <- takeMany ID; EQ; let b <- parseExpr;  return (id, Fix $ Fun id $ a.foldr Fun b)
+  REC; let id <- ID; let a <- takeMany ID; EQ; let b <- parseExpr;  return .inl (id, Fix $ Fun id $ a.foldr Fun b)
 
-def value p := show TParser Binding from ("_", ·) <$> p
-
-def declaration := first' #[ letrecDecl
-                          , letDecl
-                          , infixlDecl
-                          , infixrDecl
-                          , value parseExpr]
-
-def module : TParser $ Array Binding :=
-  sepBy (optional END) declaration <* optional END
-
-def parse (s : String) : Except String Expr :=
-  match spaces *> parseExpr <* endOfInput |>.run s |>.run' opTable with
-  | .ok _ t    => pure t
-  | .error _ e => throw (toString e)
-
-def parseModule (s : String) : EStateM String (OpTable Expr) (Array Binding) := do
-  match spaces *> module <* endOfInput |>.run s |>.run (<- get) with
-  | (.ok _ t, s)    => set s *> pure t
-  | (.error _ e, _) => throw (toString e)
+def value {α} p := show TParser $ Binding ⊕ α from (.inl ∘ ("_", ·)) <$> p
 
 end Parsing
 
@@ -340,20 +444,73 @@ inductive MLType where
   | TCon : String -> MLType
   | TArr : MLType -> MLType -> MLType
   | TProd : MLType -> MLType -> MLType
+  | TApp : String -> List MLType -> MLType
 deriving Repr, BEq, Ord, Inhabited
 
 infixr: 50 " ->' " => MLType.TArr
 infixr: 65 " ×'' " => MLType.TProd
+
 def MLType.toStr : MLType -> String
-  | TVar a => toString a | TCon a => a
-  | a ×'' b => paren (prod? a) (toStr a) ++ " × " ++ toStr b
+  | TVar a => toString a 
+  | TCon a => a
   | a ->' b =>
-    paren (arr? a) (toStr a) ++ " → " ++ toStr b where
-    paren b s := bif b then s!"({s})" else s
-    arr? | TArr _ _ => true | _ => false
-    prod? | TProd _ _ => true | _ => false
+    paren (arr? a) (toStr a) ++ " → " ++ toStr b
+  | a ×'' b => paren (prod? a) (toStr a) ++ " × " ++ toStr b
+  | TApp s [] => s | TApp s (l :: ls) =>
+    ls.foldl (init := s!"{s} {l.toStr}") fun a s =>
+      s!"{a} {s.toStr}"
+where
+  paren b s := bif b then s!"({s})" else s
+  arr? | MLType.TArr _ _ => true | _ => false
+  prod? | MLType.TProd _ _ => true | _ => false
 
 instance : ToString MLType := ⟨MLType.toStr⟩
+
+namespace PType open Parsing Lexing MLType
+
+mutual
+partial def tyCtor : TParser MLType := do
+  let id <- ID
+  if isUpperInit id then return TApp id []
+  else return TVar (.mkTV id)
+
+partial def tyApps : TParser MLType := do
+  let hd <- tyAtom
+  match hd with
+  | .TApp h [] =>
+    let args <- takeMany tyAtom
+    if args.isEmpty then return (TCon h)
+    else return TApp h args.toList
+  | _ => return hd
+
+partial def tyProd : TParser MLType := do
+  let t₁ <- tyApps
+  let tn <- takeMany (ws (char '×') *> tyApps)
+  return tn.foldr TProd t₁
+
+partial def tyArrow : TParser MLType := do
+  let lhs <- tyProd
+  (ARROW *> tyArrow >>= fun rhs => pure $ TArr lhs rhs) <|> pure lhs
+
+partial def tyAtom : TParser MLType :=
+  tyCtor <|> parenthesized tyArrow
+end
+
+structure TyDecl where
+  tycon : String
+  param : Array String
+  ctors : Array $ Symbol × List MLType
+deriving Repr
+
+def tyDecl : TParser $ Binding ⊕ TyDecl := do
+  TYPE <|> DATA let tycon <- ID let param <- takeMany ID; EQ
+  let hd <- (optional BAR *> ctor)
+  let tl <- takeMany (BAR *> ctor)
+  return .inr {tycon, param, ctors := #[hd] ++ tl}
+where
+  ctor := do let cname <- ID let args <- takeMany tyApps return (cname, args.toList)
+
+end PType
 
 inductive Scheme where
   | Forall : List TV -> MLType -> Scheme deriving Repr, BEq, Ord
@@ -368,10 +525,17 @@ instance : Inhabited Scheme where
 
 namespace MLType open TV Expr
 
+def ctorScheme (tycon : String) (tparams : List TV) (fields : List MLType) : Scheme :=
+  .Forall tparams
+  $ fields.foldr TArr
+  $ TApp tycon 
+  $ tparams.map (TVar ·)
+
 inductive TypingError
   | NoUnify (t₁ t₂ : MLType)
   | Undefined (s : String)
   | WrongCardinal (n : Nat)
+  | NoMatch (e : Expr) (arr : Array $ Pattern × Expr)
   | Duplicates (t : TV) (T : MLType) deriving Repr
 
 instance : ToString TypingError where
@@ -380,6 +544,9 @@ instance : ToString TypingError where
   | .Undefined s   => s!"Variable\n  {s}\nis not in scope.\n\
                          Note: use letrec or fixcomb if this is a recursive definition"
   | .WrongCardinal n => s!"Incorrect cardinality. Expected {n}"
+  | .NoMatch e arr =>
+    s!"The expression\n  {repr e}\ncannot be matched against any of the patterns: {repr $ arr.map (·.1)}\n\
+       This is likely because this pattern matching is non-exhaustive (No exhaustion check is performed.)"
   | .Duplicates (mkTV a) b =>
     s!"\
     Unbounded fixpoint constructor does not exist in a strongly normalized system.\n\
@@ -443,9 +610,12 @@ def applyT : Subst -> MLType -> MLType
   | s, t@(TVar a) => s.getD a t
   | s, t₁ ×'' t₂ => applyT s t₁ ×'' applyT s t₂
   | s, t₁ ->' t₂ => applyT s t₁ ->' applyT s t₂
+  | s, TApp h as => TApp h (as.map (applyT s))
 
 def fvT : MLType -> Std.HashSet TV
-  | TCon _ => ∅ | TVar a => {a} | t₁ ->' t₂ | t₁ ×'' t₂ => fvT t₁ ∪ fvT t₂
+  | TCon _ => ∅ | TVar a => {a}
+  | t₁ ->' t₂ | t₁ ×'' t₂ => fvT t₁ ∪ fvT t₂
+  | TApp _ as => as.foldl (init := ∅) fun a t => a ∪ fvT t
 
 instance : Rewritable MLType := ⟨applyT, fvT⟩
 instance : Rewritable Scheme where
@@ -459,6 +629,7 @@ instance : Rewritable Env where
   apply s e := e.map fun _ v => apply s v
   fv      e := fv e.values
 end Rewritables
+
 def gensym (n : Nat) : String :=
   let (q, r) := (n / 26, n % 26)
   let s := s!"'{Char.ofNat $ r + 97}"
@@ -466,7 +637,10 @@ def gensym (n : Nat) : String :=
   else q.toSubDigits.foldl (fun a s => a.push s) s
 def normalize : Scheme -> Scheme
   | .Forall _ body =>
-    let rec fv | TVar a => [a] | a ->' b | a ×'' b => fv a ++ fv b | TCon _ => []
+    let rec fv 
+      | TVar a => [a] | TCon _ => []
+      | a ->' b | a ×'' b => fv a ++ fv b
+      | TApp _ as => as.flatMap fv
     let ts := (List.rmDup $ fv body);
     let ord := ts.zip $ ts.foldrIdx (fun i _ a => mkTV (gensym i) :: a) []
     let rec normtype
@@ -475,6 +649,7 @@ def normalize : Scheme -> Scheme
       | TVar a  => match ord.lookup a with
                    | some x => TVar x
                    | none => panic! "some variable is undefined"
+      | TApp h as => TApp h $ as.map normtype
       | t => t
   .Forall (List.map Prod.snd ord) (normtype body)
 def merge (s₁ s₂ : Subst) := s₁ ∪ s₂.map fun _ v => apply s₁ v
@@ -492,6 +667,17 @@ partial def unify : MLType -> MLType -> Infer σ Subst
     let s₂ <- unify (apply s₁ r₁) (apply s₁ r₂)
     return s₂ ∪' s₁
   | TVar a, t | t, TVar a   => bindTV a t
+  | t₁@(TApp h₁ as₁), t₂@(TApp h₂ as₂) =>
+    if h₁ != h₂ || as₁.length != as₂.length then
+      throw $ NoUnify t₁ t₂
+    else
+      let rec go (s : Subst)
+        | [], [] => pure s
+        | x :: xs, y :: ys => do
+          let s' <- unify (apply s x) (apply s y)
+          go (s' ∪' s) xs ys
+        | _, _ => unreachable!
+      go ∅ as₁ as₂
   | t@(TCon a), t'@(TCon b) => if a == b then pure ∅ else throw $ NoUnify t t'
   | t₁, t₂                  => throw $ NoUnify t₁ t₂
 
@@ -514,6 +700,27 @@ def lookupEnv (s : String) (E : Env) : Infer σ (Subst × MLType) :=
   | some s => instantiate s >>= fun t => pure (∅ , t)
 infix :50 " ∈ₑ " => lookupEnv
 
+def peelArrows (t : MLType) : Array MLType × MLType :=
+  go #[] t where
+  go acc
+  | TArr a b => go (acc.push a) b
+  | t => (acc, t)
+
+def checkPat (E : Env) (expected : MLType) : Pattern -> Infer σ (Subst × Env)
+  | PWild => return (∅, E)
+  | PVar x => return (∅, E.insert x (.Forall [] expected))
+  | PCtor cname args => do
+    -- lookup ctor type
+    let (_, ctorTy) <- cname ∈ₑ E
+    let (argTys, resTy) := peelArrows ctorTy
+    if h :argTys.size = args.size then
+      let s₁ <- unify resTy expected
+      args.size.foldM (init := (s₁, apply s₁ E)) fun i _ (s, e) => do
+        let ti := apply s (argTys[i])
+        let (si, Ei) <- checkPat e ti (args[i])
+        return (si ∪' s, Ei)
+    else unreachable!
+
 mutual
 /--
   perform exactly 1 step of sequential inferrence in CPS style.
@@ -523,11 +730,11 @@ mutual
     (it can get complicated as `infer1` is mutually recursive with `infer`)
   - returns a continuation and a modified substitution map.
 -/
-def infer1 (E : Env) : (Subst × (MLType -> MLType)) -> Expr -> Infer σ (Subst × (MLType -> MLType))
+partial def infer1 (E : Env) : (Subst × (MLType -> MLType)) -> Expr -> Infer σ (Subst × (MLType -> MLType))
   | (s, contT), e => do
     let (s', t) <- infer (apply s E) e
     return (s' ∪' s, contT ∘ (t ->' ·))
-def infer (E : Env) : Expr -> Infer σ (Subst × MLType)
+partial def infer (E : Env) : Expr -> Infer σ (Subst × MLType)
   | Var x => x ∈ₑ E
 
   | Fun x e => do
@@ -582,6 +789,21 @@ def infer (E : Env) : Expr -> Infer σ (Subst × MLType)
     let (s₂, t₂) <- infer (apply s₁ E) e₂
     pure (s₂ ∪' s₁, (apply s₂ t₁) ×'' t₂)
 
+  | Match e discr => do
+    let (s₀, te) <- infer E e
+    let (s, t) <- discr.foldlM (init := (s₀, none)) fun (s, tRes) (p, body) => do
+      let E' := apply s E
+      let te' := apply s te
+      let (sp, Ep) <- checkPat E' te' p
+      let (sb, tb) <- infer Ep body
+      let s' := sb ∪' sp ∪' s
+      let tb' := apply s' tb
+      match tRes with
+      | none => return (s', tb')
+      | some tres =>
+        unify tres tb' <&> (· ∪' s', tRes)
+    return (s, t.get!)
+
   | CB _ => pure (∅, tBool)   | CI _  => pure (∅, tInt)
   | CS _ => pure (∅, tString) | CUnit => pure (∅, tUnit)
 end
@@ -598,19 +820,45 @@ def runInfer1 (e : Expr) (E : Env) : Except TypingError Scheme :=
 def inferToplevel (b : Array Binding) (E : Env) : Except TypingError Env :=
   b.foldlM (init := E) fun E (id, expr) => runInfer1 expr E <&> E.insert id
 
+section open Parsing Lexing
+abbrev TopDecl := Binding ⊕ PType.TyDecl
+def declaration : TParser TopDecl := first' 
+  #[ PType.tyDecl
+   , letrecDecl
+   , letDecl
+   , infixlDecl
+   , infixrDecl
+   , value parseExpr]
+
+def module : TParser $ Array TopDecl :=
+  sepBy (optional END) declaration <* optional END
+
+def parse (s : String) : Except String Expr :=
+  match spaces *> parseExpr <* endOfInput |>.run s |>.run' opTable with
+  | .ok _ t    => pure t
+  | .error _ e => throw (toString e)
+
+def parseModule (s : String) : EStateM String (OpTable Expr) (Array TopDecl) := do
+  match spaces *> module <* endOfInput |>.run s |>.run (<- get) with
+  | (.ok _ t, s)    => set s *> pure t
+  | (.error _ e, _) => throw (toString e)
+
+end 
+
 def check1 (s : String) (E : Env := defaultE) : String :=
-  match Parsing.parse s with
+  match parse s with
   | .error e => toString e
   | .ok e    =>
     match runInfer1 e E with
     | .error e' => toString e' ++ s!"AST: {reprStr e}"
     | .ok    s => toString s
 
-def asType : MLType -> Type
-  | t₁ ×'' t₂ => asType t₁ × asType t₂
-  | t₁ ->' t₂ => asType t₁ -> asType t₂
-  | TCon "Int" => Int | TCon "String" => String | TCon "Bool" => Bool | TCon "Unit" => Unit
-  | TCon _ => Empty   | TVar _ => Empty
+-- def asType : MLType -> Type
+--   | t₁ ×'' t₂ => asType t₁ × asType t₂
+--   | t₁ ->' t₂ => asType t₁ -> asType t₂
+-- 
+--   | TCon "Int" => Int | TCon "String" => String | TCon "Bool" => Bool | TCon "Unit" => Unit
+--   | TCon _ => Empty   | TVar _ => Empty
 
 mutual
 structure VEnv where
@@ -622,7 +870,10 @@ inductive Value where
   | VFRec (s: Symbol) (e : Expr) (E : VEnv)
   | VOpaque (s : Nat)
   | VEvalError (s : String)
-  | VP (e₁ e₂ : Value) deriving Nonempty
+  | VP (e₁ e₂ : Value) 
+  | VCtor (name : String) (arity : Nat) (acc : Array Value)
+  | VConstr (name : String) (fields : Array Value)
+  deriving Nonempty
 end
 instance : Inhabited Value := ⟨.VEvalError "something wrong during evaluation.\n\
                                             Note: Likely implementation error or a breach of type safety\n\
@@ -635,15 +886,43 @@ def Value.toStr : Value -> String
   | VOpaque s   => s!"<${s}::prim>"
   | VF _ _ _    => "<fun>"
   | VFRec _ _ _ => "<recfun>"
+  | VCtor n k acc => s!"<{n}/{k}{acc.foldl (· ++ " " ++ toStr ·) ""}::ctor>"
+  | VConstr n fs => fs.foldl (· ++ " " ++ toStr ·) n
   | VP v₁ v₂    => paren (prod? v₁) (toStr v₁) ++ "," ++ toStr v₂ where
     paren b s := bif b then s!"({s})" else s
     prod? | VP _ _ => true | _ => false
+instance : ToString Value := ⟨Value.toStr⟩
+
+def registerData (E : Env) (VE : VEnv) : PType.TyDecl -> IO (Env × VEnv)
+  | {ctors,tycon,param} =>
+    ctors.foldlM (init := (E, VE)) fun (E, {env := VE}) (cname, fields) =>
+      let s := ctorScheme tycon (param |>.map mkTV |>.toList) fields
+      let arity := fields.length
+      let v := if arity == 0 then .VConstr cname #[]
+                             else .VCtor cname arity #[]
+      (E.insert cname s, ⟨VE.insert cname v⟩) <$ println! "{cname} : {v} ⊢ {s}"
 
 def binop (n : Nat) (h : n ∈ [1,2,3,4]) : Int -> Int -> Int :=
   match n with
   | 1 => (· + ·) | 2 => (· - ·) | 3 => (· * ·) | 4 => (· / ·)
 
-open Value in instance : ToString Value := ⟨Value.toStr⟩ in
+def evalPat (v : Value) (VE : VEnv) : Pattern -> Option VEnv
+  | PWild => some VE
+  | PVar x => some ⟨VE.env.insert x v⟩
+  | PCtor n as =>
+    match v with
+    | .VConstr c fs =>
+      if h : c ≠ n ∨ fs.size ≠ as.size then none
+      else
+        let (ve, flag) := as.size.fold (init := (VE.env, true)) fun i _ (VE, _) =>
+          have : fs.size = as.size := not_or.mp h |>.2 |> Classical.not_not.mp
+          match evalPat fs[i] ⟨VE⟩ as[i] with
+          | some ve => (ve.env ∪ VE, true)
+          | none    => (VE, false)
+        if flag then some ⟨ve⟩ else none
+    | _ => none
+
+open Value in 
 def callForeign (as' : Value) (n : Nat) : Value :=
   let as := match as' with | VP v₁ v₂ => [v₁, v₂] | _ => [as']
   have : List.length as > 0 := by cases as' <;> simp[as]
@@ -695,6 +974,12 @@ partial def eval (E : VEnv) : Expr -> Except TypingError Value
       | Fun x body =>
         eval ⟨recE.insert x e⟩ body
       | _ => unreachable!
+    | .VCtor name ar acc =>
+      let v <- eval E a
+      let acc' := acc.push v
+      if acc'.size == ar then
+        pure $ .VConstr name acc'
+      else pure $ .VCtor name ar acc'
     | _ => unreachable!
   | Let x e body => do
     let e' <- eval E e
@@ -708,8 +993,20 @@ partial def eval (E : VEnv) : Expr -> Except TypingError Value
     | _       => throw $ WrongCardinal 2
   | Prod' e₁ e₂ => do
     pure $ VP (<-eval E e₁) (<-eval E e₂)
+  | Match e discr => do
+    let v <- eval E e
+    let rec tryDiscriminant i (h : i <= discr.size) :=
+      match i with
+      | 0 => throw $ Undefined "no pattern matched"
+      | j + 1 =>
+        let (p, body) := discr[discr.size - j.succ]
+        match evalPat v E p with
+        | some bs =>
+          eval bs body
+        | none => tryDiscriminant j $ Nat.le_of_succ_le h
+    tryDiscriminant discr.size Nat.le.refl
 
-@[always_inline, inline] def parse! s := Parsing.parse s |>.toOption |>.get!
+@[always_inline, inline] def parse! s := parse s |>.toOption |>.get!
 @[always_inline, inline] def eval! s (e : VEnv := ⟨∅⟩) := parse! s |> eval e |>.toOption |>.get!
 
 def arityGen (prim : Symbol) (arity : Nat) (primE : VEnv := ⟨∅⟩) : Value :=
@@ -754,14 +1051,16 @@ def evalToplevel (bs : Array Binding) (VE : VEnv) : Except TypingError VEnv :=
   bs.foldlM (init := VE) fun VE@⟨env⟩ (id, e) => (VEnv.mk ∘ env.insert id) <$> eval VE e
 
 def interpret (PE : OpTable Expr) (E : Env) (VE : VEnv) (s : String) : IO (OpTable Expr × Env × VEnv) := do
-  match Parsing.parseModule s PE with
-  | .ok bs PE => 
-     let E <- IO.ofExcept $ inferToplevel bs E |>.mapError toString
-     let VE@{env} <- IO.ofExcept $ evalToplevel bs VE |>.mapError toString
-     (PE, E, VE) <$ bs.forM fun (id, _) =>
-       match E.get? id, env.get? id with
-       | some t, some r => println! "{id} : {r} ⊢ {t}"
-       | _, _ => pure ()
+  match parseModule s PE with
+  | .ok bs PE =>
+    bs.foldlM (init := (PE, E, VE)) fun (PE, E, ve@{env := VE}) b => do
+      match b with
+      | .inl (id, expr) =>
+        let ty <- IO.ofExcept $ runInfer1 expr E |>.mapError toString
+        let v <- IO.ofExcept $ eval ve expr |>.mapError toString
+        (PE, E.insert id ty, ⟨VE.insert id v⟩) <$ println! "{id} : {v} ⊢ {ty}"
+      | .inr tydecl =>
+        (PE, ·) <$> registerData E ve tydecl
   | .error e _ => IO.throwServerError e
 
 section PP open PrettyPrint Alignment
@@ -794,7 +1093,8 @@ open MLType IO in
 def main : IO Unit := do
   setStdoutBuf false
 
-  let motd := "A basic language using Hindley-Milner type system with a naive interpreted implementation.\n\
+  let motd := "A basic language using Hindley-Milner type system\n\
+               with a naive (term-rewriting) interpreted implementation.\n\
                For language specifications see source: Playbook/hm.lean\n\
                Type #help;; to check available commands.\n\
                To exit press <C-d> (Unix) or <C-z> if on Windows."
@@ -825,7 +1125,7 @@ def main : IO Unit := do
     if buf.startsWith "#help" then
       print $ tabulate "Commands" {align := alignH} helpMsg
     else if buf.startsWith "#ast" then
-      match (Parsing.parseModule $ buf.drop 4).run pe with
+      match (parseModule $ buf.drop 4).run pe with
       | .ok b _  => println! reprStr b
       | .error e _ => println! e
     else if buf.startsWith "#dump" then
@@ -839,10 +1139,10 @@ def main : IO Unit := do
             println fs
             let (PE', E', VE') <- interpret pe e ve fs
             PE.set PE' *> E.set E' *> VE.set VE'
-          catch e => 
+          catch e =>
             println! e;
-            println! 
-              PrettyPrint.Text.bold 
+            println!
+              PrettyPrint.Text.bold
                 "NOTE: Evaluation context is restore as there are errors.\n\
                  Fix those then #load again to update it." true
     else try
